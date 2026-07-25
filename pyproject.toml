@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pokemon-battler"
+version = "0.1.0"
+description = "SFT and evaluation harness for a small Pokémon Showdown policy model"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bitsandbytes>=0.46.1,<0.50",
+    "lz4>=4.3.3",
+    "peft>=0.14.0",
+    "safetensors>=0.4.5",
+    "torch>=2.4.0",
+    "transformers>=4.48.0,<6",
+]
+
+[project.scripts]
+pokemon-prepare = "pokemon_battler.prepare:main"
+pokemon-inspect = "pokemon_battler.inspect_data:main"
+pokemon-train = "pokemon_battler.train:main"
+pokemon-evaluate = "pokemon_battler.evaluate:main"
+pokemon-predict = "pokemon_battler.predict:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pokemon_battler"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
