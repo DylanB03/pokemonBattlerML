@@ -27,23 +27,42 @@ The first training harness is ready:
 - Provides a one-command train/evaluate/report runner.
 - Reports reproducible static, frequency, ranking, and action-type baselines.
 - Includes a compact feature-hashed non-language-model policy baseline.
+- Includes a move-name-free hybrid policy with a versioned 97-value mechanics
+  tensor for each action.
+- Precomputes mechanics into memory-mapped float16 caches and provides a
+  mechanics-only MLP ablation.
+- Stops one-command runs after four flat validation checks while preserving the
+  exact best checkpoint.
 
 Verified locally with:
 
-- 29 unit tests.
+- 39 unit tests.
 - One real Qwen2.5-0.5B LoRA optimization and adapter-save step.
 - Adapter reload and constrained action evaluation.
 - One real Qwen2.5-0.5B policy-head optimization, save, reload, and prediction.
 - One real Qwen2.5-0.5B candidate-head optimization plus validation, best/final
   save, reload, automatic prompt/head detection, and constrained prediction.
 - Non-language-model train, save, reload, and batched evaluation smoke tests.
+- Mechanics feature, cache, hybrid-score, and mechanics-only backpropagation
+  tests.
+
+## Candidate-head reference result
+
+The compact candidate-head run was stopped after step 5,000. Its best fixed
+1,024-row validation result was 374/1,024, or 36.5234% net top-1 action
+agreement, with candidate NLL 1.6630. Training loss continued to fluctuate in
+roughly the 1.60-1.75 band. Because 5,000 updates cover about 56% of the
+286,059-row split at effective batch 32, this is neither a completed epoch nor a
+5,000-row final evaluation. It is the reference the next representation must
+beat.
 
 Next experiment:
 
 ```bash
 .venv/bin/python -m pokemon_battler.experiment \
-  --output-dir outputs/candidate-compact-1epoch
+  --output-dir outputs/mechanics-v1-1epoch
 ```
 
-This performs one complete pass over the prepared split and compares the best
-and final checkpoints on the same validation rows.
+This builds or reuses the mechanics caches, trains for at most one complete
+pass, stops a validation plateau automatically, and compares the best and final
+checkpoints on the same validation rows.

@@ -6,6 +6,7 @@ import torch
 
 from pokemon_battler.training_data import (
     CandidateCollator,
+    MechanicsCollator,
     PolicyCollator,
     SFTCollator,
     state_with_row_context,
@@ -90,6 +91,24 @@ class CollatorTests(unittest.TestCase):
         self.assertGreaterEqual(int(positions[5]), 0)
         self.assertTrue(torch.all(positions[[0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12]] == -1))
         self.assertLess(int(positions.max()), int(batch["attention_mask"].sum()))
+
+    def test_mechanics_collator_adds_features_without_candidate_text(self) -> None:
+        collator = MechanicsCollator(FakeTokenizer(), max_length=20_000)
+        batch = collator(
+            [
+                {
+                    "state": state(forced_switch=True),
+                    "action_id": 4,
+                    "legal_action_ids": [4, 5],
+                }
+            ]
+        )
+        self.assertEqual(batch["mechanics_features"].shape[:2], (1, 13))
+        self.assertEqual(batch["action_ids"].tolist(), [4])
+        self.assertEqual(
+            torch.nonzero(batch["legal_action_mask"][0], as_tuple=False).flatten().tolist(),
+            [4, 5],
+        )
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@
 *The model's mediocre results forced me to rethink the loss, the action
 representation, and what I was willing to call a result.*
 
-*Status: August 2026. The first full candidate-ranking run is still in
-progress. Results from that run are labeled as such below.*
+*Status: August 2026. I stopped the candidate-ranking run at step 5,000 and
+built the mechanics-conditioned experiment that follows it.*
 
 The unfine-tuned model's first answer to a battle prompt looked like this:
 
@@ -192,7 +192,7 @@ removed the tokenization problem and trained cross-entropy directly over legal
 action IDs. The head still assigned one output neuron to `A4`, even though `A4`
 can name a different Pokémon on every turn.
 
-The current candidate head attaches scores to action descriptions. Each legal
+The candidate head attaches scores to action descriptions. Each legal
 action gets a short description containing the move and Terastallization flag
 or the switch target. I take the transformer hidden state at that description
 and pass it through one shared MLP. The loss is:
@@ -266,11 +266,11 @@ With 286,059 examples and an effective batch of 32, the new run lasts about
 The runner trains, evaluates `best/` and `final/`, and writes the comparison to
 `run_summary.json`.
 
-## The new loss is 1.8, and that is fine so far
+## The higher loss was honest, but the run still flattened
 
 Around step 200, the candidate-head training loss was about 1.8. The old loss
-was already near 0.6 at a similar point. Comparing them directly would repeat
-the mistake that led to the redesign.
+was already near 0.6 at a similar point. Comparing them directly would have
+repeated the mistake that led to the redesign.
 
 The old number averaged the action decision with easy `A` and EOS tokens. The
 new number is one cross-entropy over every legal candidate. Across the training
@@ -278,19 +278,103 @@ set, uniform legal selection has an average NLL of 2.127. A loss of 1.8 gives a
 geometric mean target probability of about 16.5%; the uniform-NLL reference is
 11.9%.
 
-Step 200 is inside the roughly 268-step warmup. It covers about 2.2% of one
-dataset pass. The loss has moved below uniform, but that is all I can claim from
-it. The first useful evidence will be the step-500 validation accuracy, MRR,
-top-k scores, and prediction counts.
+Step 200 was inside the roughly 268-step warmup and covered about 2.2% of one
+dataset pass. The loss had moved below uniform. That was encouraging, but it did
+not settle whether the candidate representation would keep improving.
 
-I am keeping the 0.5B model until this run tells me whether candidate ranking
-helps. I have also left active learning, continual learning, simulator RL,
-resume support, and a large ablation matrix out of the current scope. None of
-them explains the original 0.6 plateau as directly as the action objective,
-short training budget, positional labels, and bloated prompt.
+It did improve, then flattened. At step 5,000 the best fixed 1,024-row
+validation result was 374 correct decisions:
 
-Once the full pass finishes, I will compare `best/` and `final/` on the fixed
-5,000-row sample. If the candidate policy beats the old 29.4% result and the
-baselines, I will take it into reproducible Showdown battles against fixed
-opponents. If it does not, the validation slices and prediction counts should
-show which actions are still failing.
+| Metric | Candidate-head result |
+| --- | ---: |
+| Net top-1 action agreement | 36.5234% |
+| Validation candidate NLL | 1.6630 |
+| Dataset pass completed | about 55.9% |
+
+The net accuracy is the fraction of all decisions where the exact recorded
+action was ranked first. It is not the earlier within-type number where the
+correct move-versus-switch category was supplied. That distinction makes the
+result meaningful. It also does not make it a battle win rate.
+
+Training loss spent thousands of updates moving between roughly 1.60 and 1.75.
+Individual log points were noisy, but the validation accuracy had also stopped
+moving enough to justify the remaining compute. I stopped at 5,000 instead of
+turning “finish the epoch” into an objective of its own. This run had consumed
+about 160,000 examples. Another small learning-rate adjustment was not the most
+convincing next idea.
+
+The older 29.4% generative result used 500 validation examples, while the 36.52%
+result used a deterministic 1,024-row sample. I therefore treat the new number
+as a reference, not a clean 7.1-point head-to-head improvement. The final runner
+will evaluate selected checkpoints on the same 5,000 rows.
+
+## I stopped asking Qwen to rediscover the type chart
+
+The candidate head fixed the loss, but its input still represented moves as
+names. A 0.5B language model had to learn that a name implied a type, power,
+accuracy, secondary effect, stat change, or switch cost before it could learn
+whether the action fit the situation.
+
+Those facts are not language. They are deterministic game mechanics.
+
+I built a second candidate branch with 97 numeric values per action. It includes
+type effectiveness, STAB, priority, PP, expected hits, approximate damage range,
+healing, recoil, status chances, stat-stage changes, hazard interaction, switch
+HP after entry, and known offensive and defensive matchup pressure. The tensor
+has shape `13 x 97`; it goes straight into a small MLP and adds no prompt tokens.
+
+The language model still has a job. It reads one compact state containing the
+Pokémon, team context, field, HP, items, abilities, base stats, statuses, and
+boosts. It produces a state vector. A shared scorer combines that vector with
+each candidate's mechanics vector and assigns the legal logits.
+
+I removed move lines, previous move names, and candidate descriptions from this
+prompt. On the first 100 training rows, its median was 466 tokens. The old
+compact candidate prompt was 1,211 on those same rows. Adding structured
+mechanics therefore cut the text by about 61% in that check instead of tripling
+it.
+
+Move names still appear inside the deterministic preprocessing step because
+they are the key used to retrieve structured move data. They are discarded
+before model input. Damage is explicitly approximate: spectator replays do not
+contain EVs, IVs, natures, or every temporary modifier. I would rather provide a
+consistent pressure estimate and an availability flag than call an invented
+number exact.
+
+This is not RAG. There is no generated type-chart paragraph for Qwen to parse.
+The model receives floats. The same feature builder can later run on live battle
+state, where simulator-backed damage can replace the approximate columns.
+
+## The MLP is an ablation, not an abandonment of language models
+
+I also added a mechanics-only policy: a small multilayer perceptron that scores
+the same `13 x 97` tensor with the same legal mask and no Qwen representation.
+It answers one useful question. If it matches the hybrid, Qwen is not adding
+enough strategic context to earn its compute. If the hybrid wins, the gap is the
+value of the learned state representation.
+
+That comparison does not force the project away from language models. It gives
+the language model a falsifiable role.
+
+The next hybrid run starts with one command:
+
+```bash
+.venv/bin/python -m pokemon_battler.experiment \
+  --output-dir outputs/mechanics-v1-1epoch
+```
+
+The command builds reusable memory-mapped mechanics caches, trains the hybrid,
+evaluates the best and final checkpoints, and writes the report. It now stops
+after four validation checks without at least a 0.2-point accuracy gain. The
+best checkpoint still records every exact gain, so early stopping only controls
+the compute budget.
+
+I am still keeping the 0.5B model. I have also left active learning, continual
+learning, simulator RL, resume support, and model upgrades out of this phase.
+The next experiment changes the representation of facts the current model was
+being asked to relearn.
+
+If the mechanics-conditioned checkpoint improves on the 36.52% reference, I
+will compare it with the mechanics-only ablation and take the selected policy
+into reproducible Showdown battles against fixed opponents. Replay agreement is
+a useful gate. Real games remain the test that matters.

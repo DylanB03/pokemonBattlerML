@@ -12,6 +12,7 @@ from pokemon_battler.train import (
     _evaluate_model,
     _training_class_weights,
     learning_rate_multiplier,
+    meaningful_validation_improvement,
 )
 
 
@@ -114,6 +115,24 @@ class TrainTests(unittest.TestCase):
         assert values is not None
         self.assertTrue(torch.isfinite(tensor).all())
         self.assertGreater(values[9], values[0])
+
+    def test_early_stopping_uses_a_meaningful_accuracy_delta(self) -> None:
+        self.assertFalse(
+            meaningful_validation_improvement(
+                0.361,
+                0.36,
+                minimum_delta=0.002,
+                higher_is_better=True,
+            )
+        )
+        self.assertTrue(
+            meaningful_validation_improvement(
+                0.363,
+                0.36,
+                minimum_delta=0.002,
+                higher_is_better=True,
+            )
+        )
 
 
 if __name__ == "__main__":

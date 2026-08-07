@@ -77,11 +77,15 @@ Implemented:
 - Battle-grouped and chronological dataset splits.
 - Turn-level Generation 9 OU behavior-cloning examples.
 - Legal-action validation and constrained inference.
-- Full SFT, fixed policy-head, shared candidate-head, LoRA, and 4-bit QLoRA support.
-- Compact and verbose versioned prompt serializers.
+- Full SFT, fixed policy-head, shared candidate-head, mechanics-head, LoRA, and
+  4-bit QLoRA support.
+- Compact, verbose, and move-name-free mechanics prompt serializers.
+- Versioned 97-value candidate mechanics vectors, memory-mapped caches, and a
+  mechanics-only MLP ablation.
 - A legally masked policy scorer that returns a score for every candidate.
 - Deterministic offline ranking, family, entropy, and action-agreement evaluation.
-- One-command full-pass training plus best/final evaluation and reporting.
+- One-command cache preparation, plateau-aware training, best/final evaluation,
+  and reporting.
 
 Not yet implemented:
 
@@ -101,9 +105,12 @@ Deliverables:
 
 - Complete the high-rated Generation 9 OU development dataset.
 - Pass the 128-example memorization test.
-- Train the first complete-pass compact candidate-head checkpoint.
-- Use its learning curves to decide whether a second pass or controlled weighting
-  comparison is warranted.
+- Preserve the step-5,000 candidate-head checkpoint as a 36.52% validation
+  reference, not as a completed epoch or live-play result.
+- Train the mechanics-conditioned checkpoint for up to one complete pass, with
+  validation plateau stopping.
+- Compare the hybrid against the mechanics-only ablation to measure the value of
+  Qwen's state representation.
 - Report held-out action agreement, action-type accuracy, replay-candidate
   constraint coverage, and top-action margins. Measure true legality only under
   the live simulator mask.

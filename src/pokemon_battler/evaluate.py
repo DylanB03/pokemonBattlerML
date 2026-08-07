@@ -14,13 +14,16 @@ from pokemon_battler.evaluation_utils import (
 )
 from pokemon_battler.modeling import (
     has_candidate_head,
+    has_mechanics_head,
     has_policy_head,
     indexed_logits_parameter,
     load_candidate_head,
+    load_mechanics_head,
     load_policy_head,
     load_policy_model,
     load_training_metadata,
     masked_candidate_logits,
+    masked_mechanics_logits,
     masked_policy_logits,
     score_legal_actions,
 )
@@ -28,6 +31,8 @@ from pokemon_battler.prompting import PROMPT_FORMATS
 from pokemon_battler.training_data import (
     CandidateCollator,
     JsonlOffsetDataset,
+    MechanicsCacheDataset,
+    MechanicsCollator,
     PolicyCollator,
     state_with_row_context,
 )
@@ -51,7 +56,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     model.eval()
     scoring = args.scoring
     if scoring == "auto":
-        if has_candidate_head(args.adapter):
+        if has_mechanics_head(args.adapter):
+            scoring = "mechanics-head"
+        elif has_candidate_head(args.adapter):
             scoring = "candidate-head"
         elif has_policy_head(args.adapter):
             scoring = "policy-head"
@@ -63,17 +70,29 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         policy_head = load_policy_head(model, args.adapter, device)
         policy_head.eval()
         candidate_head = None
+        mechanics_head = None
     elif scoring == "candidate-head":
         if not args.adapter:
             raise ValueError("Candidate-head scoring requires --adapter")
         candidate_head = load_candidate_head(model, args.adapter, device)
         candidate_head.eval()
         policy_head = None
+        mechanics_head = None
+    elif scoring == "mechanics-head":
+        if not args.adapter:
+            raise ValueError("Mechanics-head scoring requires --adapter")
+        mechanics_head = load_mechanics_head(model, args.adapter, device)
+        mechanics_head.eval()
+        policy_head = None
+        candidate_head = None
     else:
         policy_head = None
         candidate_head = None
+        mechanics_head = None
 
-    complete_dataset = JsonlOffsetDataset(args.data_file)
+    complete_dataset: Any = JsonlOffsetDataset(args.data_file)
+    if mechanics_head is not None and args.mechanics_cache:
+        complete_dataset = MechanicsCacheDataset(complete_dataset, args.mechanics_cache)
     dataset, sample_metadata = select_evaluation_dataset(
         complete_dataset,
         max_examples=args.max_examples,
@@ -88,8 +107,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         max_saved_errors=args.max_saved_errors,
     )
 
-    if candidate_head is not None or policy_head is not None:
-        collator_class = CandidateCollator if candidate_head is not None else PolicyCollator
+    if candidate_head is not None or policy_head is not None or mechanics_head is not None:
+        if mechanics_head is not None:
+            collator_class = MechanicsCollator
+        elif candidate_head is not None:
+            collator_class = CandidateCollator
+        else:
+            collator_class = PolicyCollator
         collator = collator_class(
             tokenizer,
             max_length=args.max_length,
@@ -110,6 +134,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     logits = masked_candidate_logits(
                         model,
                         candidate_head,
+                        batch,
+                        logits_parameter=logits_parameter,
+                    )
+                elif mechanics_head is not None:
+                    logits = masked_mechanics_logits(
+                        model,
+                        mechanics_head,
                         batch,
                         logits_parameter=logits_parameter,
                     )
@@ -170,6 +201,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "scoring": scoring,
         "data_file": args.data_file,
         "baseline_train_file": args.baseline_train_file,
+        "mechanics_cache": args.mechanics_cache,
         "max_length": args.max_length,
         "batch_size": args.batch_size,
         "prompt_format": prompt_format,
@@ -215,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scoring",
-        choices=("auto", "generative", "policy-head", "candidate-head"),
+        choices=("auto", "generative", "policy-head", "candidate-head", "mechanics-head"),
         default="auto",
         help="Auto-detect a saved action head or use generative candidate scoring.",
     )
@@ -229,6 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-saved-errors", type=int, default=100)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--output")
+    parser.add_argument("--mechanics-cache")
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument(

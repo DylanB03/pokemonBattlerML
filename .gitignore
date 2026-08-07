@@ -7,10 +7,13 @@ data/
 outputs/
 reports/
 
+*.mechanics-v1.npy
+*.mechanics-v1.npy.json
+*.mechanics-v1.npy.partial
+
 *.safetensors
 *.bin
 *.pt
 *.pth
 
 .venv/
-

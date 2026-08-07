@@ -10,10 +10,12 @@ from safetensors.torch import load_file as load_safetensors
 from safetensors.torch import save_file as save_safetensors
 
 from pokemon_battler.actions import ACTION_COUNT, action_label, legal_action_ids
+from pokemon_battler.mechanics import MECHANICS_FEATURE_COUNT, candidate_feature_matrix
 from pokemon_battler.prompting import encode_candidate_prompt, render_prompt
 
 POLICY_HEAD_FILENAME = "policy_head.safetensors"
 CANDIDATE_HEAD_FILENAME = "candidate_head.safetensors"
+MECHANICS_HEAD_FILENAME = "mechanics_head.safetensors"
 
 
 class CandidateHead(torch.nn.Module):
@@ -30,6 +32,46 @@ class CandidateHead(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.network(hidden_states).squeeze(-1)
+
+
+class MechanicsHead(torch.nn.Module):
+    """Fuse one state representation with a numeric vector for every action."""
+
+    def __init__(self, hidden_size: int, feature_count: int = MECHANICS_FEATURE_COUNT) -> None:
+        super().__init__()
+        mechanics_size = max(min(hidden_size // 4, 256), 64)
+        scoring_size = max(hidden_size // 2, 128)
+        self.hidden_size = hidden_size
+        self.feature_count = feature_count
+        self.state_norm = torch.nn.LayerNorm(hidden_size)
+        self.mechanics_encoder = torch.nn.Sequential(
+            torch.nn.Linear(feature_count, mechanics_size),
+            torch.nn.GELU(),
+            torch.nn.LayerNorm(mechanics_size),
+        )
+        self.scorer = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size + mechanics_size, scoring_size),
+            torch.nn.GELU(),
+            torch.nn.Linear(scoring_size, 1),
+        )
+
+    def forward(
+        self,
+        state_hidden: torch.Tensor,
+        mechanics_features: torch.Tensor,
+    ) -> torch.Tensor:
+        if mechanics_features.ndim != 3 or mechanics_features.shape[1:] != (
+            ACTION_COUNT,
+            self.feature_count,
+        ):
+            raise ValueError(
+                "MechanicsHead expects features shaped "
+                f"[batch, {ACTION_COUNT}, {self.feature_count}]"
+            )
+        state = self.state_norm(state_hidden.float())
+        mechanics = self.mechanics_encoder(mechanics_features.float())
+        expanded_state = state[:, None, :].expand(-1, ACTION_COUNT, -1)
+        return self.scorer(torch.cat((expanded_state, mechanics), dim=-1)).squeeze(-1)
 
 
 def _resolve_cached_path(model_name_or_path: str, local_files_only: bool) -> str:
@@ -237,6 +279,16 @@ def create_candidate_head(model: Any, device: torch.device) -> CandidateHead:
     return head
 
 
+def create_mechanics_head(model: Any, device: torch.device) -> MechanicsHead:
+    head = MechanicsHead(int(model.config.hidden_size)).to(device=device, dtype=torch.float32)
+    for module in head.modules():
+        if isinstance(module, torch.nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+    return head
+
+
 def save_policy_head(head: torch.nn.Linear, output_dir: str | Path) -> None:
     output_path = Path(output_dir) / POLICY_HEAD_FILENAME
     state = {
@@ -287,6 +339,32 @@ def load_candidate_head(
 
 def has_candidate_head(adapter_path: str | Path | None) -> bool:
     return bool(adapter_path) and (Path(adapter_path) / CANDIDATE_HEAD_FILENAME).is_file()
+
+
+def save_mechanics_head(head: MechanicsHead, output_dir: str | Path) -> None:
+    output_path = Path(output_dir) / MECHANICS_HEAD_FILENAME
+    state = {
+        key: value.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        for key, value in head.state_dict().items()
+    }
+    save_safetensors(state, output_path)
+
+
+def load_mechanics_head(
+    model: Any,
+    adapter_path: str | Path,
+    device: torch.device,
+) -> MechanicsHead:
+    path = Path(adapter_path) / MECHANICS_HEAD_FILENAME
+    if not path.is_file():
+        raise FileNotFoundError(f"Mechanics-head checkpoint does not exist: {path}")
+    head = create_mechanics_head(model, device)
+    head.load_state_dict(load_safetensors(path, device=str(device)))
+    return head
+
+
+def has_mechanics_head(adapter_path: str | Path | None) -> bool:
+    return bool(adapter_path) and (Path(adapter_path) / MECHANICS_HEAD_FILENAME).is_file()
 
 
 def _last_hidden_states(
@@ -369,6 +447,32 @@ def masked_candidate_logits(
     return logits.masked_fill(~legal_mask, float("-inf"))
 
 
+def masked_mechanics_logits(
+    model: Any,
+    mechanics_head: MechanicsHead,
+    batch: dict[str, torch.Tensor],
+    *,
+    logits_parameter: str | None,
+) -> torch.Tensor:
+    """Score numeric action mechanics against one shared transformer state."""
+    hidden_states = _last_hidden_states(
+        model,
+        batch,
+        logits_parameter=logits_parameter,
+    )
+    last_positions = batch["attention_mask"].sum(dim=1) - 1
+    rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+    state_hidden = hidden_states[rows, last_positions]
+    features = batch["mechanics_features"].to(hidden_states.device)
+    logits = mechanics_head(state_hidden, features)
+    legal_mask = batch["legal_action_mask"].to(hidden_states.device, dtype=torch.bool)
+    if logits.shape != legal_mask.shape:
+        raise ValueError("Mechanics head must return one score per action candidate")
+    if not bool(legal_mask.any(dim=1).all()):
+        raise ValueError("Every mechanics-head example must contain a legal action")
+    return logits.masked_fill(~legal_mask, float("-inf"))
+
+
 def policy_head_loss(
     model: Any,
     policy_head: torch.nn.Linear,
@@ -404,6 +508,25 @@ def candidate_head_loss(
     targets = batch["action_ids"].to(logits.device)
     if not bool(torch.isfinite(logits.gather(1, targets[:, None])).all()):
         raise ValueError("A candidate-head target is absent from its legal-action mask")
+    return torch.nn.functional.cross_entropy(logits, targets)
+
+
+def mechanics_head_loss(
+    model: Any,
+    mechanics_head: MechanicsHead,
+    batch: dict[str, torch.Tensor],
+    *,
+    logits_parameter: str | None,
+) -> torch.Tensor:
+    logits = masked_mechanics_logits(
+        model,
+        mechanics_head,
+        batch,
+        logits_parameter=logits_parameter,
+    )
+    targets = batch["action_ids"].to(logits.device)
+    if not bool(torch.isfinite(logits.gather(1, targets[:, None])).all()):
+        raise ValueError("A mechanics-head target is absent from its legal-action mask")
     return torch.nn.functional.cross_entropy(logits, targets)
 
 
@@ -478,6 +601,47 @@ def score_candidate_head_actions(
     logits = masked_candidate_logits(
         model,
         candidate_head,
+        batch,
+        logits_parameter=indexed_logits_parameter(model),
+    )[0]
+    return {action_id: float(logits[action_id].item()) for action_id in legal}
+
+
+@torch.inference_mode()
+def score_mechanics_head_actions(
+    model: Any,
+    tokenizer: Any,
+    mechanics_head: MechanicsHead,
+    state: dict[str, Any],
+    device: torch.device,
+    *,
+    max_length: int = 4096,
+    prompt_format: str = "mechanics-v1",
+) -> dict[int, float]:
+    prompt_ids = tokenizer.encode(
+        render_prompt(state, prompt_format),
+        add_special_tokens=True,
+    )
+    if len(prompt_ids) > max_length:
+        raise ValueError(
+            f"Prompt has {len(prompt_ids)} tokens and exceeds max_length={max_length}"
+        )
+    legal = legal_action_ids(state)
+    legal_mask = torch.zeros((1, ACTION_COUNT), dtype=torch.bool, device=device)
+    legal_mask[0, legal] = True
+    batch = {
+        "input_ids": torch.tensor([prompt_ids], dtype=torch.long, device=device),
+        "attention_mask": torch.ones((1, len(prompt_ids)), dtype=torch.long, device=device),
+        "legal_action_mask": legal_mask,
+        "mechanics_features": torch.tensor(
+            [candidate_feature_matrix(state)],
+            dtype=torch.float32,
+            device=device,
+        ),
+    }
+    logits = masked_mechanics_logits(
+        model,
+        mechanics_head,
         batch,
         logits_parameter=indexed_logits_parameter(model),
     )[0]

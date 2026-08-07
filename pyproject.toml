@@ -11,7 +11,9 @@ requires-python = ">=3.10"
 dependencies = [
     "bitsandbytes>=0.46.1,<0.50",
     "lz4>=4.3.3",
+    "numpy>=2.0.2",
     "peft>=0.14.0",
+    "poke-env>=0.15.0,<0.16",
     "safetensors>=0.4.5",
     "torch>=2.4.0",
     "transformers>=4.48.0,<6",
@@ -24,6 +26,8 @@ pokemon-train = "pokemon_battler.train:main"
 pokemon-evaluate = "pokemon_battler.evaluate:main"
 pokemon-predict = "pokemon_battler.predict:main"
 pokemon-baseline = "pokemon_battler.baseline:main"
+pokemon-mechanics-cache = "pokemon_battler.mechanics_cache:main"
+pokemon-mechanics-baseline = "pokemon_battler.mechanics_baseline:main"
 pokemon-run = "pokemon_battler.experiment:main"
 
 [tool.hatch.build.targets.wheel]

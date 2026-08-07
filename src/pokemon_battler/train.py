@@ -24,20 +24,27 @@ from pokemon_battler.modeling import (
     attach_lora,
     candidate_head_loss,
     create_candidate_head,
+    create_mechanics_head,
     create_policy_head,
     indexed_logits_parameter,
     load_policy_model,
     masked_candidate_logits,
+    masked_mechanics_logits,
     masked_policy_logits,
+    mechanics_head_loss,
     policy_head_loss,
     resolve_dtype,
     save_candidate_head,
+    save_mechanics_head,
     save_policy_head,
 )
+from pokemon_battler.mechanics import MECHANICS_FEATURE_COUNT, MECHANICS_SCHEMA
 from pokemon_battler.prompting import PROMPT_FORMATS
 from pokemon_battler.training_data import (
     CandidateCollator,
     JsonlOffsetDataset,
+    MechanicsCacheDataset,
+    MechanicsCollator,
     PolicyCollator,
     SFTCollator,
 )
@@ -51,6 +58,7 @@ DEFAULT_LORA_TARGETS = (
     "up_proj",
     "down_proj",
 )
+ACTION_OBJECTIVES = {"policy-head", "candidate-head", "mechanics-head"}
 
 
 def set_seed(seed: int) -> None:
@@ -83,6 +91,23 @@ def learning_rate_multiplier(
     return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
 
 
+def meaningful_validation_improvement(
+    current: float,
+    best: float,
+    *,
+    minimum_delta: float,
+    higher_is_better: bool,
+) -> bool:
+    """Return whether a metric moved far enough to reset early-stop patience."""
+    if not math.isfinite(best):
+        return math.isfinite(current)
+    if not math.isfinite(current):
+        return False
+    if higher_is_better:
+        return current > best + minimum_delta
+    return current < best - minimum_delta
+
+
 def _action_logits(
     model: Any,
     action_head: torch.nn.Module,
@@ -92,6 +117,13 @@ def _action_logits(
 ) -> torch.Tensor:
     if objective == "candidate-head":
         return masked_candidate_logits(
+            model,
+            action_head,
+            batch,
+            logits_parameter=logits_parameter,
+        )
+    if objective == "mechanics-head":
+        return masked_mechanics_logits(
             model,
             action_head,
             batch,
@@ -125,6 +157,13 @@ def _action_loss(
         return torch.nn.functional.cross_entropy(logits, targets, weight=class_weights)
     if objective == "candidate-head":
         return candidate_head_loss(
+            model,
+            action_head,
+            batch,
+            logits_parameter=logits_parameter,
+        )
+    if objective == "mechanics-head":
+        return mechanics_head_loss(
             model,
             action_head,
             batch,
@@ -171,7 +210,7 @@ def _evaluate_model(
                 break
             batch = {key: value.to(device) for key, value in batch.items()}
             with _autocast_context(device, dtype):
-                if objective in {"policy-head", "candidate-head"}:
+                if objective in ACTION_OBJECTIVES:
                     assert action_head is not None
                     logits = _action_logits(
                         model,
@@ -271,6 +310,8 @@ def _save_checkpoint(
     if action_head is not None:
         if objective == "candidate-head":
             save_candidate_head(action_head, output_dir)
+        elif objective == "mechanics-head":
+            save_mechanics_head(action_head, output_dir)
         else:
             save_policy_head(action_head, output_dir)
     (output_dir / "training_config.json").write_text(
@@ -350,11 +391,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("scheduler_steps must be positive")
     if args.max_class_weight < 1:
         raise ValueError("max_class_weight must be at least 1")
-    if args.objective in {"policy-head", "candidate-head"} and args.loss_projection == "full":
+    if args.early_stopping_patience < 0:
+        raise ValueError("early_stopping_patience cannot be negative")
+    if args.early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta cannot be negative")
+    if args.objective == "candidate-head" and args.prompt_format == "mechanics-v1":
+        raise ValueError("candidate-head requires prompt candidate lines; use compact-v1")
+    if args.objective in ACTION_OBJECTIVES and args.loss_projection == "full":
         raise ValueError(
             "--loss-projection full benchmarks the causal LM head and is not applicable "
             "to an action-head objective"
         )
+    if args.objective == "mechanics-head":
+        args.mechanics_schema = MECHANICS_SCHEMA
+        args.mechanics_feature_count = MECHANICS_FEATURE_COUNT
 
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
@@ -406,6 +456,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         action_head: torch.nn.Module | None = create_policy_head(model, device)
     elif args.objective == "candidate-head":
         action_head = create_candidate_head(model, device)
+    elif args.objective == "mechanics-head":
+        action_head = create_mechanics_head(model, device)
     else:
         action_head = None
     print(
@@ -414,7 +466,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "training_objective": args.objective,
                 "loss_projection": (
                     "causal_lm_head_bypassed"
-                    if args.objective in {"policy-head", "candidate-head"}
+                    if args.objective in ACTION_OBJECTIVES
                     else (
                         "supervised_positions_only"
                         if logits_parameter is not None
@@ -423,7 +475,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "logits_parameter": (
                     None
-                    if args.objective in {"policy-head", "candidate-head"}
+                    if args.objective in ACTION_OBJECTIVES
                     else logits_parameter
                 ),
                 "prompt_format": args.prompt_format,
@@ -433,7 +485,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     dataset_limit = args.overfit_examples
-    train_dataset = JsonlOffsetDataset(args.train_file, limit=dataset_limit)
+    train_dataset: Any = JsonlOffsetDataset(args.train_file, limit=dataset_limit)
+    if args.objective == "mechanics-head" and args.train_mechanics_cache:
+        train_dataset = MechanicsCacheDataset(train_dataset, args.train_mechanics_cache)
     class_weights, serialized_class_weights = _training_class_weights(
         args.train_file,
         args.class_weighting,
@@ -451,7 +505,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     )
     validation_sample_metadata: dict[str, Any] | None = None
     if args.validation_file:
-        complete_validation_dataset = JsonlOffsetDataset(args.validation_file)
+        complete_validation_dataset: Any = JsonlOffsetDataset(args.validation_file)
+        if args.objective == "mechanics-head" and args.validation_mechanics_cache:
+            complete_validation_dataset = MechanicsCacheDataset(
+                complete_validation_dataset,
+                args.validation_mechanics_cache,
+            )
         validation_dataset, validation_sample_metadata = select_evaluation_dataset(
             complete_validation_dataset,
             max_examples=args.validation_examples,
@@ -464,6 +523,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "sft": SFTCollator,
         "policy-head": PolicyCollator,
         "candidate-head": CandidateCollator,
+        "mechanics-head": MechanicsCollator,
     }
     collator_kwargs: dict[str, Any] = {
         "max_length": args.max_length,
@@ -548,6 +608,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     accumulated_micro_steps = 0
     best_validation_loss = math.inf
     best_validation_accuracy = -math.inf
+    early_stopping_best = math.inf if args.objective == "sft" else -math.inf
+    validations_without_improvement = 0
+    early_stop_requested = False
     last_validation_step = 0
     history: list[dict[str, Any]] = []
     examples_seen = 0
@@ -580,7 +643,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     def run_validation(step: int) -> dict[str, Any] | None:
-        nonlocal best_validation_accuracy, best_validation_loss, last_validation_step
+        nonlocal best_validation_accuracy, best_validation_loss
+        nonlocal early_stopping_best, early_stop_requested
+        nonlocal last_validation_step, validations_without_improvement
         if validation_loader is None:
             return None
         metrics = _evaluate_model(
@@ -593,9 +658,6 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             logits_parameter,
             args.objective,
         )
-        record = {"step": step, **metrics}
-        print(json.dumps(record), flush=True)
-        history.append(record)
         last_validation_step = step
         validation_loss = float(metrics["validation_loss"])
         validation_accuracy = float(metrics.get("validation_accuracy", -math.inf))
@@ -627,6 +689,41 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 action_head,
                 args.objective,
             )
+        if args.early_stopping_patience > 0:
+            if args.objective == "sft":
+                meaningful_improvement = meaningful_validation_improvement(
+                    validation_loss,
+                    early_stopping_best,
+                    minimum_delta=args.early_stopping_min_delta,
+                    higher_is_better=False,
+                )
+                if meaningful_improvement:
+                    early_stopping_best = validation_loss
+            else:
+                meaningful_improvement = meaningful_validation_improvement(
+                    validation_accuracy,
+                    early_stopping_best,
+                    minimum_delta=args.early_stopping_min_delta,
+                    higher_is_better=True,
+                )
+                if meaningful_improvement:
+                    early_stopping_best = validation_accuracy
+            validations_without_improvement = (
+                0
+                if meaningful_improvement
+                else validations_without_improvement + 1
+            )
+            early_stop_requested = (
+                validations_without_improvement >= args.early_stopping_patience
+            )
+        record = {
+            "step": step,
+            **metrics,
+            "validations_without_improvement": validations_without_improvement,
+            "early_stop_requested": early_stop_requested,
+        }
+        print(json.dumps(record), flush=True)
+        history.append(record)
         return metrics
 
     for epoch in range(args.epochs):
@@ -639,7 +736,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             interval_examples += current_batch_size
             interval_tokens += current_tokens
             with _autocast_context(device, dtype):
-                if args.objective in {"policy-head", "candidate-head"}:
+                if args.objective in ACTION_OBJECTIVES:
                     assert action_head is not None
                     batch_loss = _action_loss(
                         model,
@@ -780,9 +877,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     args.objective,
                 )
 
-            if global_step >= training_updates:
+            if global_step >= training_updates or early_stop_requested:
                 break
-        if global_step >= training_updates:
+        if global_step >= training_updates or early_stop_requested:
             break
 
     if validation_loader is not None and last_validation_step != global_step:
@@ -790,6 +887,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     final_config = vars(args) | {
         "global_step": global_step,
+        "early_stopped": early_stop_requested,
+        "validations_without_improvement": validations_without_improvement,
         "train_examples": len(train_dataset),
         "validation_examples_loaded": (
             len(validation_dataset) if validation_dataset is not None else 0
@@ -837,11 +936,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", choices=("lora", "full"), default="lora")
     parser.add_argument(
         "--objective",
-        choices=("sft", "policy-head", "candidate-head"),
-        default="candidate-head",
+        choices=("sft", "policy-head", "candidate-head", "mechanics-head"),
+        default="mechanics-head",
         help=(
-            "Use legacy generative SFT, a fixed 13-way head, or one shared scorer "
-            "over legal candidate representations."
+            "Use legacy generative SFT, a fixed 13-way head, a shared text-candidate "
+            "scorer, or the zero-token numeric mechanics scorer."
         ),
     )
     parser.add_argument(
@@ -911,7 +1010,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt-format",
         choices=PROMPT_FORMATS,
-        default="compact-v1",
+        default="mechanics-v1",
+    )
+    parser.add_argument(
+        "--train-mechanics-cache",
+        help="Optional mechanics-v1 .npy cache aligned with the training JSONL.",
+    )
+    parser.add_argument(
+        "--validation-mechanics-cache",
+        help="Optional mechanics-v1 .npy cache aligned with the validation JSONL.",
     )
     parser.add_argument("--num-workers", type=int, default=0)
 
@@ -935,6 +1042,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log-steps", type=int, default=10)
     parser.add_argument("--eval-steps", type=int, default=100)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help=(
+            "Stop after this many validations without a meaningful improvement; "
+            "zero disables early stopping."
+        ),
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation accuracy (or SFT loss) change that resets patience.",
+    )
     parser.add_argument("--save-steps", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     return parser

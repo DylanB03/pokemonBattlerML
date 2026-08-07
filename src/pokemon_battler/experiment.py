@@ -10,6 +10,7 @@ import torch
 
 from pokemon_battler.evaluate import build_parser as build_evaluate_parser
 from pokemon_battler.evaluate import evaluate
+from pokemon_battler.mechanics_cache import build_feature_cache, default_cache_path
 from pokemon_battler.train import build_parser as build_train_parser
 from pokemon_battler.train import train
 
@@ -74,6 +75,10 @@ def _train_arguments(args: argparse.Namespace) -> argparse.Namespace:
         str(args.seed),
         "--eval-steps",
         str(args.eval_steps),
+        "--early-stopping-patience",
+        str(args.early_stopping_patience),
+        "--early-stopping-min-delta",
+        str(args.early_stopping_min_delta),
         "--log-steps",
         str(args.log_steps),
         "--num-workers",
@@ -87,6 +92,18 @@ def _train_arguments(args: argparse.Namespace) -> argparse.Namespace:
         values.append("--local-files-only")
     if args.gradient_checkpointing:
         values.append("--gradient-checkpointing")
+    if args.objective == "mechanics-head":
+        values.extend(
+            [
+                "--train-mechanics-cache",
+                str(args.train_mechanics_cache or default_cache_path(args.train_file)),
+                "--validation-mechanics-cache",
+                str(
+                    args.validation_mechanics_cache
+                    or default_cache_path(args.validation_file)
+                ),
+            ]
+        )
     return build_train_parser().parse_args(values)
 
 
@@ -128,6 +145,16 @@ def _evaluate_checkpoint(
         values.append("--load-in-4bit")
     if args.local_files_only:
         values.append("--local-files-only")
+    if args.objective == "mechanics-head":
+        values.extend(
+            [
+                "--mechanics-cache",
+                str(
+                    args.validation_mechanics_cache
+                    or default_cache_path(args.validation_file)
+                ),
+            ]
+        )
     report = evaluate(build_evaluate_parser().parse_args(values))
     _release_model_memory()
     return report
@@ -154,6 +181,29 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         raise FileNotFoundError(args.validation_file)
     if args.load_in_4bit and not torch.cuda.is_available():
         raise RuntimeError("The default 4-bit experiment requires CUDA; pass --no-4bit for CPU")
+
+    if args.objective == "mechanics-head":
+        for data_file, configured_cache in (
+            (args.train_file, args.train_mechanics_cache),
+            (args.validation_file, args.validation_mechanics_cache),
+        ):
+            cache_path = configured_cache or default_cache_path(data_file)
+            print(
+                json.dumps(
+                    {
+                        "phase": "prepare-mechanics-cache",
+                        "data_file": str(data_file),
+                        "cache_file": str(cache_path),
+                    }
+                ),
+                flush=True,
+            )
+            build_feature_cache(
+                data_file,
+                cache_path,
+                overwrite=args.rebuild_mechanics_cache,
+                progress_every=args.mechanics_cache_progress_every,
+            )
 
     print(
         json.dumps(
@@ -204,7 +254,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train one complete policy experiment, evaluate best/final, and summarize."
+        description="Train up to one complete policy experiment, evaluate, and summarize."
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--train-file", type=Path, default=Path("data/gen9ou-dev/train.jsonl"))
@@ -216,13 +266,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
     parser.add_argument(
         "--objective",
-        choices=("candidate-head", "policy-head"),
-        default="candidate-head",
+        choices=("mechanics-head", "candidate-head", "policy-head"),
+        default="mechanics-head",
     )
     parser.add_argument(
         "--prompt-format",
-        choices=("compact-v1", "verbose-v1"),
-        default="compact-v1",
+        choices=("mechanics-v1", "compact-v1", "verbose-v1"),
+        default="mechanics-v1",
     )
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -248,9 +298,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-examples", type=int, default=1024)
     parser.add_argument("--evaluation-examples", type=int, default=5000)
     parser.add_argument("--eval-steps", type=int, default=500)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=4,
+        help="Stop after this many validation checks without a meaningful gain.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.002,
+        help="Accuracy gain required to reset early-stopping patience.",
+    )
     parser.add_argument("--log-steps", type=int, default=20)
     parser.add_argument("--evaluation-log-every", type=int, default=100)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--train-mechanics-cache", type=Path)
+    parser.add_argument("--validation-mechanics-cache", type=Path)
+    parser.add_argument("--rebuild-mechanics-cache", action="store_true")
+    parser.add_argument("--mechanics-cache-progress-every", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16"), default="auto")
     parser.add_argument(

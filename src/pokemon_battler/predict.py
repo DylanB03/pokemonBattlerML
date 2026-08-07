@@ -8,13 +8,16 @@ from typing import Any, Sequence
 from pokemon_battler.actions import action_label, describe_action
 from pokemon_battler.modeling import (
     has_candidate_head,
+    has_mechanics_head,
     has_policy_head,
     load_candidate_head,
+    load_mechanics_head,
     load_policy_head,
     load_policy_model,
     load_training_metadata,
     score_candidate_head_actions,
     score_legal_actions,
+    score_mechanics_head_actions,
     score_policy_head_actions,
 )
 from pokemon_battler.prompting import PROMPT_FORMATS
@@ -38,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adapter")
     parser.add_argument(
         "--scoring",
-        choices=("auto", "generative", "policy-head", "candidate-head"),
+        choices=("auto", "generative", "policy-head", "candidate-head", "mechanics-head"),
         default="auto",
     )
     parser.add_argument("--state-file", type=Path, required=True)
@@ -81,13 +84,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     model.eval()
     scoring = args.scoring
     if scoring == "auto":
-        if has_candidate_head(args.adapter):
+        if has_mechanics_head(args.adapter):
+            scoring = "mechanics-head"
+        elif has_candidate_head(args.adapter):
             scoring = "candidate-head"
         elif has_policy_head(args.adapter):
             scoring = "policy-head"
         else:
             scoring = "generative"
-    if scoring == "candidate-head":
+    if scoring == "mechanics-head":
+        if not args.adapter:
+            raise ValueError("Mechanics-head scoring requires --adapter")
+        mechanics_head = load_mechanics_head(model, args.adapter, device)
+        mechanics_head.eval()
+        scores = score_mechanics_head_actions(
+            model,
+            tokenizer,
+            mechanics_head,
+            state,
+            device,
+            max_length=args.max_length,
+            prompt_format=prompt_format,
+        )
+    elif scoring == "candidate-head":
         if not args.adapter:
             raise ValueError("Candidate-head scoring requires --adapter")
         candidate_head = load_candidate_head(model, args.adapter, device)

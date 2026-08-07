@@ -10,6 +10,7 @@ from pokemon_battler.modeling import (
     assistant_only_loss,
     indexed_logits_parameter,
     masked_candidate_logits,
+    masked_mechanics_logits,
     masked_policy_logits,
     policy_head_loss,
     score_legal_actions,
@@ -84,6 +85,16 @@ class HiddenStateModel:
         return SimpleNamespace(hidden_states=(hidden,))
 
     __call__ = forward
+
+
+class FeatureScorer(torch.nn.Module):
+    def forward(
+        self,
+        state_hidden: torch.Tensor,
+        mechanics_features: torch.Tensor,
+    ) -> torch.Tensor:
+        del state_hidden
+        return mechanics_features[..., 0]
 
 
 class ModelingTests(unittest.TestCase):
@@ -188,6 +199,27 @@ class ModelingTests(unittest.TestCase):
         )
         self.assertEqual(int(logits.argmax(dim=1).item()), 1)
         self.assertTrue(torch.isneginf(logits[0, 0]))
+
+    def test_mechanics_head_scores_numeric_features_and_masks_illegal_actions(self) -> None:
+        features = torch.zeros((1, 13, 1))
+        features[0, 1, 0] = 3.0
+        features[0, 5, 0] = 100.0
+        batch = {
+            "input_ids": torch.tensor([[0, 1]]),
+            "attention_mask": torch.ones((1, 2), dtype=torch.long),
+            "mechanics_features": features,
+            "legal_action_mask": torch.tensor(
+                [[True, True] + [False] * 11]
+            ),
+        }
+        logits = masked_mechanics_logits(
+            HiddenStateModel(),
+            FeatureScorer(),
+            batch,
+            logits_parameter="logits_to_keep",
+        )
+        self.assertEqual(int(logits.argmax(dim=1).item()), 1)
+        self.assertTrue(torch.isneginf(logits[0, 5]))
 
 
 if __name__ == "__main__":

@@ -21,27 +21,34 @@ read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
 ## Run the recommended experiment
 
 With the existing `data/gen9ou-dev` split and cached Qwen checkpoint, this one
-command trains for one complete dataset pass, evaluates `best/` and `final/` on
+command trains for up to one complete dataset pass, evaluates `best/` and `final/` on
 the same 5,000 hash-sampled validation rows, and writes a comparison summary:
 
 ```bash
 .venv/bin/python -m pokemon_battler.experiment \
-  --output-dir outputs/candidate-compact-1epoch
+  --output-dir outputs/mechanics-v1-1epoch
 ```
 
-The defaults are candidate-wise legal-action cross-entropy, the compact prompt,
-QLoRA, effective batch 32, SDPA, a cosine schedule with a 5% floor, and seed 42.
-No `--max-steps` is used, so the 286,059-row training split produces about 8,940
-optimizer updates. Results are saved to:
+The defaults are candidate-wise legal-action cross-entropy, a shared numeric
+mechanics scorer, a move-name-free state prompt, QLoRA, effective batch 32,
+SDPA, a cosine schedule with a 5% floor, and seed 42. The runner builds
+memory-mapped feature caches before training. No `--max-steps` is used, so the
+286,059-row training split allows about 8,940 optimizer updates. Early stopping
+ends the run after four 500-step validation checks without an accuracy gain of
+at least 0.002. Results are saved to:
 
 ```text
-outputs/candidate-compact-1epoch/best/
-outputs/candidate-compact-1epoch/final/
-outputs/candidate-compact-1epoch/history.json
-outputs/candidate-compact-1epoch/reports/best-validation.json
-outputs/candidate-compact-1epoch/reports/final-validation.json
-outputs/candidate-compact-1epoch/run_summary.json
+outputs/mechanics-v1-1epoch/best/
+outputs/mechanics-v1-1epoch/final/
+outputs/mechanics-v1-1epoch/history.json
+outputs/mechanics-v1-1epoch/reports/best-validation.json
+outputs/mechanics-v1-1epoch/reports/final-validation.json
+outputs/mechanics-v1-1epoch/run_summary.json
 ```
+
+The first cache build is CPU work and writes about 688 MiB for training and
+69 MiB for validation. Later runs reuse those files when the source JSONL and
+feature schema are unchanged.
 
 This command requires CUDA for its default 4-bit configuration. After an
 editable reinstall, `pokemon-run --output-dir ...` is the equivalent entry
@@ -56,7 +63,7 @@ This is the default protocol for one 8 GB NVIDIA GPU:
 | Environment check | Unit tests and cached model | Verify the installation | All tests pass and CUDA is visible |
 | Data development set | 2% deterministic turn sample | Retain battle diversity at manageable cost | At least 50k train and 5k validation rows |
 | Memorization gate | 128 rows, at most 400 updates | Detect broken labels, masking, LoRA, or loading | At least 95% accuracy on the same 128 rows |
-| First model | One complete pass, about 8,940 updates | Test the aligned candidate objective | Best hash-sampled validation action accuracy |
+| First model | Up to one complete pass, about 8,940 updates | Test the mechanics-conditioned objective | Best hash-sampled validation action accuracy |
 | Main data | 10% deterministic turn sample | Scale only after the first result is sound | Reinspect lengths before training |
 | Main policy | One to three complete passes | Produce the selected checkpoint | Compare `best/` and `final/` |
 | Final offline test | 5,000 held-out test rows | Report imitation performance once | Compare base and trained policies |
@@ -107,6 +114,12 @@ command in this guide includes both arguments and therefore performs QLoRA.
   tokenization bias
 - A shared candidate head that scores each legal action description with the
   same network and randomizes candidate order during training
+- A 97-value mechanics vector for every candidate, including type matchup,
+  estimated damage pressure, move effects, stat changes, and switch entry cost
+- A hybrid mechanics head that fuses those vectors with one Qwen state embedding
+  without turning the vectors or move names into prompt tokens
+- A mechanics-only MLP baseline using the identical vectors and legal mask
+- Versioned, memory-mapped feature caches that are reused across runs
 - A compact prompt whose measured median is 1,157 tokens instead of 2,057
 - Validation action NLL, top-k accuracy, MRR, action-family metrics, entropy,
   prediction histograms, and best-checkpoint selection by action accuracy
@@ -114,6 +127,7 @@ command in this guide includes both arguments and therefore performs QLoRA.
   examples/tokens per second, and dataset-pass reporting
 - Optional capped class/family weighting
 - A single-command train/evaluate/report experiment runner
+- Validation-based plateau stopping that preserves the best checkpoint
 - Preparation-time turn/player counts, past opponent reveals without future
   leakage, and conservative zero-PP mask refinement
 - Full fine-tuning, LoRA, and 4-bit QLoRA loading
@@ -139,11 +153,27 @@ outside `legal_action_ids` is set to negative infinity. Illegal replay candidate
 therefore receive zero probability and cannot be selected. This also removes the
 different Qwen token lengths of `A0` and `A10` from the learning objective.
 
-The recommended `--objective candidate-head` path records the hidden state at
+The former `--objective candidate-head` path records the hidden state at
 each legal-action description and applies one shared MLP scorer to all of them.
 It uses the same legal mask, but makes the score depend directly on the candidate
 semantics instead of a permanently assigned A0-A12 output weight. Candidate
 order is randomized during training to reduce position shortcuts.
+
+The recommended `--objective mechanics-head` path removes move and candidate
+names from the prompt. It builds a 97-value vector for each A0-A12 candidate and
+feeds that tensor directly to a shared MLP. The vector contains action kind,
+type effectiveness, STAB, accuracy, PP, priority, approximate damage range,
+secondary effects, healing, recoil, stat changes, hazard interaction, switch HP,
+and matchup pressure. Qwen still encodes the strategic battle state once; the
+head scores each candidate by combining that state embedding with its vector.
+Illegal rows are masked before cross-entropy and argmax.
+
+This is not RAG and does not ask a 0.5B model to parse generated damage prose.
+Move names are used once by the deterministic feature builder to look up
+mechanics, then discarded from the model input. Damage values are reproducible
+estimates rather than exact simulator rolls because the replay rows do not carry
+EVs, IVs, natures, or every transient modifier. See
+[docs/mechanics-v1.md](docs/mechanics-v1.md) for the schema and limitations.
 
 A direct training command equivalent to the training phase of `pokemon-run` is:
 
@@ -152,9 +182,11 @@ pokemon-train \
   --model Qwen/Qwen2.5-0.5B \
   --train-file data/gen9ou-dev/train.jsonl \
   --validation-file data/gen9ou-dev/validation.jsonl \
-  --output-dir outputs/candidate-compact-1epoch \
-  --objective candidate-head \
-  --prompt-format compact-v1 \
+  --output-dir outputs/mechanics-v1-1epoch \
+  --objective mechanics-head \
+  --prompt-format mechanics-v1 \
+  --train-mechanics-cache data/gen9ou-dev/train.mechanics-v1.npy \
+  --validation-mechanics-cache data/gen9ou-dev/validation.mechanics-v1.npy \
   --method lora \
   --local-files-only \
   --load-in-4bit \
@@ -167,8 +199,19 @@ pokemon-train \
   --validation-examples 1024 \
   --validation-sample-mode hash \
   --validation-sample-seed 42 \
-  --eval-steps 500
+  --eval-steps 500 \
+  --early-stopping-patience 4 \
+  --early-stopping-min-delta 0.002
 ```
+
+When calling `pokemon-train` directly, create the caches first:
+
+```bash
+pokemon-mechanics-cache --data-file data/gen9ou-dev/train.jsonl
+pokemon-mechanics-cache --data-file data/gen9ou-dev/validation.jsonl
+```
+
+The one-command `pokemon-run` path performs those steps automatically.
 
 `pokemon-evaluate` automatically detects a saved policy head. To evaluate the
 unfine-tuned base model with the existing legal-candidate mask on a deterministic
@@ -230,6 +273,26 @@ This model embeds deterministic hashes of structured state and candidate-action
 features and scores their interaction with a small network. It is not a language
 model, uses the same legal mask, and tests whether the 0.5B causal model earns its
 additional cost.
+
+There is also a stricter mechanics-only ablation. It receives the exact same
+97-value candidate vectors as the hybrid model and no Qwen representation:
+
+```bash
+pokemon-mechanics-baseline train \
+  --train-file data/gen9ou-dev/train.jsonl \
+  --validation-file data/gen9ou-dev/validation.jsonl \
+  --output-dir outputs/mechanics-only-baseline
+
+pokemon-mechanics-baseline evaluate \
+  --checkpoint outputs/mechanics-only-baseline/best \
+  --data-file data/gen9ou-dev/validation.jsonl \
+  --output reports/mechanics-only-validation.json
+```
+
+If the mechanics-only network matches the hybrid model, Qwen is not adding
+enough state value to justify its compute. If the hybrid wins clearly, the gap
+measures what the learned state representation contributes beyond the engineered
+candidate mechanics.
 
 ### Selective logits
 
@@ -399,12 +462,18 @@ If real prompts exceed 4096, first make the serializer more compact and rerun
 the inspection. Increasing context beyond 4096 is the last option on an 8 GB
 GPU.
 
+`mechanics-v1` is shorter because candidate moves travel through the numeric
+branch, not the tokenizer. On a quick fixed check of the first 100 training
+rows, its median was 466 tokens versus 1,211 for `compact-v1`; its maximum was
+558 versus 1,414. Run `pokemon-inspect --prompt-format mechanics-v1` on a larger
+sample before changing the context ceiling.
+
 ## Legacy causal-LM experiment protocol
 
 The remaining numbered sections document the original generative-SFT research
 protocol. They are retained for reproducibility, but they are not the current
 recommended run and some of their budgets intentionally describe the old
-objective. Use the one-command candidate-head experiment at the top of this
+objective. Use the one-command mechanics-head experiment at the top of this
 README for the next model run. When reproducing a command in this legacy
 section, add `--objective sft --prompt-format verbose-v1` explicitly.
 

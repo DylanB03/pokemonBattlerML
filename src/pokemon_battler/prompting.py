@@ -20,7 +20,8 @@ RULES:
 - Output exactly one listed action ID and nothing else."""
 
 COMPACT_TASK_HEADER = "Choose the legal action most likely to win. Output only its action ID."
-PROMPT_FORMATS = ("verbose-v1", "compact-v1")
+MECHANICS_TASK_HEADER = "Encode this battle state for legal-action scoring."
+PROMPT_FORMATS = ("verbose-v1", "compact-v1", "mechanics-v1")
 
 POKEMON_FIELDS = (
     "name",
@@ -141,7 +142,12 @@ def _compact_move(move: dict[str, Any]) -> str:
     )
 
 
-def _compact_pokemon(pokemon: dict[str, Any], label: str) -> list[str]:
+def _compact_pokemon(
+    pokemon: dict[str, Any],
+    label: str,
+    *,
+    include_moves: bool = True,
+) -> list[str]:
     name = _scalar(pokemon.get("name", "unknown"))
     fields = [
         label,
@@ -183,7 +189,8 @@ def _compact_pokemon(pokemon: dict[str, Any], label: str) -> list[str]:
     if any(value != 0 for value in boosts):
         fields.append("boosts=" + ",".join(_scalar(value) for value in boosts))
     lines = ["|".join(fields)]
-    lines.extend(f"{label}M|{_compact_move(move)}" for move in sorted_moves(pokemon))
+    if include_moves:
+        lines.extend(f"{label}M|{_compact_move(move)}" for move in sorted_moves(pokemon))
     return lines
 
 
@@ -283,6 +290,52 @@ def _render_compact_sections(state: dict[str, Any]) -> PromptSections:
     )
 
 
+def _render_mechanics_sections(state: dict[str, Any]) -> PromptSections:
+    """Render only strategic context; action mechanics travel in a numeric tensor."""
+    switches = sorted_switches(state)
+    globals_line = "|".join(
+        (
+            "S",
+            f"fmt={_scalar(state['format'])}",
+            f"turn={_scalar(state.get('turn_index', 'unknown'))}",
+            f"forced={int(bool(state.get('forced_switch', False)))}",
+            f"tera={int(bool(state.get('can_tera', False)))}",
+            f"weather={_scalar(state.get('weather', 'noweather'))}",
+            f"field={_scalar(state.get('battle_field', 'nofield'))}",
+            f"pc={_scalar(state.get('player_conditions', 'noconditions'))}",
+            f"oc={_scalar(state.get('opponent_conditions', 'noconditions'))}",
+            f"prem={_scalar(state.get('player_remaining', 'unknown'))}",
+            f"orem={_scalar(state.get('opponents_remaining', 'unknown'))}",
+            f"opreview={_scalar(state.get('opponent_teampreview', []))}",
+        )
+    )
+    lines = [MECHANICS_TASK_HEADER, globals_line]
+    lines.extend(
+        _compact_pokemon(state["player_active_pokemon"], "PA", include_moves=False)
+    )
+    lines.extend(
+        _compact_pokemon(state["opponent_active_pokemon"], "OA", include_moves=False)
+    )
+    active_name = str(state["opponent_active_pokemon"].get("name", "")).lower()
+    for pokemon in state.get("opponent_revealed_pokemon", []):
+        if str(pokemon.get("name", "")).lower() != active_name:
+            lines.extend(_compact_pokemon(pokemon, "OR", include_moves=False))
+    for switch_index, pokemon in enumerate(switches):
+        lines.extend(
+            _compact_pokemon(
+                pokemon,
+                f"SW{action_label(4 + switch_index)}",
+                include_moves=False,
+            )
+        )
+    lines.append("STATE_END")
+    return PromptSections(
+        prefix="\n".join(lines) + "\n",
+        candidates=(),
+        suffix="",
+    )
+
+
 def validate_state(state: dict[str, Any]) -> None:
     required = {
         "format",
@@ -310,6 +363,8 @@ def render_prompt_sections(
         return _render_verbose_sections(state)
     if prompt_format == "compact-v1":
         return _render_compact_sections(state)
+    if prompt_format == "mechanics-v1":
+        return _render_mechanics_sections(state)
     raise ValueError(f"Unknown prompt format {prompt_format!r}; choose from {PROMPT_FORMATS}")
 
 
