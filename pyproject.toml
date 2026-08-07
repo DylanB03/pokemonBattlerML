@@ -23,6 +23,8 @@ pokemon-inspect = "pokemon_battler.inspect_data:main"
 pokemon-train = "pokemon_battler.train:main"
 pokemon-evaluate = "pokemon_battler.evaluate:main"
 pokemon-predict = "pokemon_battler.predict:main"
+pokemon-baseline = "pokemon_battler.baseline:main"
+pokemon-run = "pokemon_battler.experiment:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

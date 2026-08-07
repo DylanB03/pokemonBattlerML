@@ -18,12 +18,32 @@ The first training harness is ready:
 - Renders prompts dynamically and applies loss only to the action target.
 - Supports full SFT, LoRA, and 4-bit QLoRA.
 - Evaluates by ranking only currently legal actions.
+- Supports directly legal-masked fixed and shared candidate action heads.
+- Uses a compact prompt with a measured 1,157-token median on 25k examples.
+- Selects checkpoints using deterministic validation action accuracy and reports
+  action NLL, top-k accuracy, MRR, family slices, entropy, and prediction counts.
+- Keeps short-run limits separate from the LR schedule horizon and reports actual
+  dataset passes, gradients, throughput, and clipping.
+- Provides a one-command train/evaluate/report runner.
+- Reports reproducible static, frequency, ranking, and action-type baselines.
+- Includes a compact feature-hashed non-language-model policy baseline.
 
 Verified locally with:
 
-- 11 unit tests.
+- 29 unit tests.
 - One real Qwen2.5-0.5B LoRA optimization and adapter-save step.
 - Adapter reload and constrained action evaluation.
+- One real Qwen2.5-0.5B policy-head optimization, save, reload, and prediction.
+- One real Qwen2.5-0.5B candidate-head optimization plus validation, best/final
+  save, reload, automatic prompt/head detection, and constrained prediction.
+- Non-language-model train, save, reload, and batched evaluation smoke tests.
 
-Next experiment: prepare a high-rated Gen 9 OU pilot, inspect prompt lengths, run the
-128-example overfit check, and then train the first 50k-example model.
+Next experiment:
+
+```bash
+.venv/bin/python -m pokemon_battler.experiment \
+  --output-dir outputs/candidate-compact-1epoch
+```
+
+This performs one complete pass over the prepared split and compares the best
+and final checkpoints on the same validation rows.

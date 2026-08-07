@@ -23,7 +23,7 @@ def sorted_switches(state: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(switches[:5], key=lambda pokemon: _normalized_name(pokemon.get("name", "")))
 
 
-def legal_action_ids(state: dict[str, Any]) -> list[int]:
+def recoverable_legal_action_ids(state: dict[str, Any]) -> list[int]:
     """
     Reproduce ``UniversalAction.maybe_valid_actions`` from Metamon.
 
@@ -42,6 +42,39 @@ def legal_action_ids(state: dict[str, Any]) -> list[int]:
 
     legal.extend(range(4, 4 + len(switches)))
     return sorted(legal)
+
+
+def pp_aware_legal_action_ids(state: dict[str, Any]) -> list[int]:
+    """Remove zero-PP moves while retaining replay-recoverable switch legality."""
+    legal = recoverable_legal_action_ids(state)
+    moves = sorted_moves(state["player_active_pokemon"])
+    zero_pp_move_slots = {
+        move_index
+        for move_index, move in enumerate(moves)
+        if isinstance(move.get("current_pp"), (int, float)) and move["current_pp"] <= 0
+    }
+    return [
+        action_id
+        for action_id in legal
+        if not (
+            action_id in zero_pp_move_slots
+            or action_id - 9 in zero_pp_move_slots
+        )
+    ]
+
+
+def legal_action_ids(state: dict[str, Any]) -> list[int]:
+    """Return a prepared override when present, otherwise replay-recoverable actions."""
+    prepared = state.get("prepared_legal_action_ids")
+    if prepared is None:
+        return recoverable_legal_action_ids(state)
+    legal = sorted({int(value) for value in prepared})
+    if not legal or any(action_id not in ACTION_IDS for action_id in legal):
+        raise ValueError("prepared_legal_action_ids must contain actions from A0 through A12")
+    recoverable = set(recoverable_legal_action_ids(state))
+    if not set(legal).issubset(recoverable):
+        raise ValueError("Prepared legal-action override contains unrecoverable actions")
+    return legal
 
 
 def action_label(action_id: int) -> str:
@@ -87,4 +120,3 @@ def describe_action(state: dict[str, Any], action_id: int) -> dict[str, Any]:
         "name": move["name"],
         "terastallize": True,
     }
-

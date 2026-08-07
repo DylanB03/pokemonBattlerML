@@ -7,8 +7,9 @@ from pokemon_battler.actions import (
     describe_action,
     legal_action_ids,
     parse_action_label,
+    pp_aware_legal_action_ids,
 )
-from pokemon_battler.prompting import render_prompt
+from pokemon_battler.prompting import render_prompt, render_prompt_sections
 from tests.helpers import state
 
 
@@ -39,11 +40,31 @@ class ActionTests(unittest.TestCase):
         self.assertIn("<A4> universal_action=4 type=switch species=alakazam", prompt)
         self.assertTrue(prompt.endswith("<ACTION>\n"))
 
+    def test_compact_prompt_keeps_candidate_mapping(self) -> None:
+        sections = render_prompt_sections(state(), "compact-v1")
+        prompt = sections.text
+        self.assertIn("LEGAL\nA0|move|ironhead|tera=0", prompt)
+        self.assertIn("A4|switch|alakazam", prompt)
+        self.assertTrue(prompt.endswith("ANSWER\n"))
+
     def test_action_label_round_trip(self) -> None:
         for action_id in range(13):
             self.assertEqual(parse_action_label(action_label(action_id)), action_id)
         with self.assertRaises(ValueError):
             parse_action_label("A13")
+
+    def test_pp_aware_mask_removes_normal_and_tera_versions(self) -> None:
+        battle_state = state()
+        iron_head = next(
+            move for move in battle_state["player_active_pokemon"]["moves"]
+            if move["name"] == "ironhead"
+        )
+        iron_head["current_pp"] = 0
+        refined = pp_aware_legal_action_ids(battle_state)
+        self.assertNotIn(0, refined)
+        self.assertNotIn(9, refined)
+        battle_state["prepared_legal_action_ids"] = refined
+        self.assertEqual(legal_action_ids(battle_state), refined)
 
 
 if __name__ == "__main__":

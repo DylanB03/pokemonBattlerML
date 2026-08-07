@@ -9,8 +9,8 @@ from typing import Any, Sequence
 
 from pokemon_battler.actions import sorted_switches
 from pokemon_battler.modeling import load_tokenizer
-from pokemon_battler.prompting import render_prompt
-from pokemon_battler.training_data import JsonlOffsetDataset
+from pokemon_battler.prompting import PROMPT_FORMATS, render_prompt
+from pokemon_battler.training_data import JsonlOffsetDataset, state_with_row_context
 
 
 def _percentile(sorted_values: list[int], quantile: float) -> int:
@@ -32,7 +32,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
     example_prompt: str | None = None
 
     for row in dataset:
-        prompt = render_prompt(row["state"])
+        prompt = render_prompt(state_with_row_context(row), args.prompt_format)
         if example_prompt is None:
             example_prompt = prompt
         token_lengths.append(len(tokenizer.encode(prompt, add_special_tokens=True)))
@@ -55,6 +55,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
     report = {
         "examples": len(dataset),
         "model_tokenizer": args.model,
+        "prompt_format": args.prompt_format,
         "prompt_tokens": length_summary,
         "prompt_characters": {
             "min": character_lengths[0],
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
     parser.add_argument("--max-examples", type=int, default=10_000)
     parser.add_argument("--max-length", type=int, default=4096)
+    parser.add_argument(
+        "--prompt-format",
+        choices=PROMPT_FORMATS,
+        default="compact-v1",
+    )
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--example-output")
     parser.add_argument("--output")
@@ -107,4 +113,3 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -1,0 +1,273 @@
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+from pathlib import Path
+from typing import Any, Sequence
+
+import torch
+
+from pokemon_battler.evaluate import build_parser as build_evaluate_parser
+from pokemon_battler.evaluate import evaluate
+from pokemon_battler.train import build_parser as build_train_parser
+from pokemon_battler.train import train
+
+
+def _release_model_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _train_arguments(args: argparse.Namespace) -> argparse.Namespace:
+    values = [
+        "--model",
+        args.model,
+        "--train-file",
+        str(args.train_file),
+        "--validation-file",
+        str(args.validation_file),
+        "--output-dir",
+        str(args.output_dir),
+        "--objective",
+        args.objective,
+        "--prompt-format",
+        args.prompt_format,
+        "--method",
+        "lora",
+        "--dtype",
+        args.dtype,
+        "--attn-implementation",
+        args.attn_implementation,
+        "--batch-size",
+        str(args.batch_size),
+        "--eval-batch-size",
+        str(args.eval_batch_size),
+        "--gradient-accumulation-steps",
+        str(args.gradient_accumulation_steps),
+        "--learning-rate",
+        str(args.learning_rate),
+        "--class-weighting",
+        args.class_weighting,
+        "--max-class-weight",
+        str(args.max_class_weight),
+        "--lora-rank",
+        str(args.lora_rank),
+        "--lora-alpha",
+        str(args.lora_alpha),
+        "--lora-dropout",
+        str(args.lora_dropout),
+        "--epochs",
+        str(args.epochs),
+        "--lr-scheduler",
+        args.lr_scheduler,
+        "--min-lr-ratio",
+        str(args.min_lr_ratio),
+        "--max-length",
+        str(args.max_length),
+        "--validation-examples",
+        str(args.validation_examples),
+        "--validation-sample-mode",
+        "hash",
+        "--validation-sample-seed",
+        str(args.seed),
+        "--eval-steps",
+        str(args.eval_steps),
+        "--log-steps",
+        str(args.log_steps),
+        "--num-workers",
+        str(args.num_workers),
+        "--seed",
+        str(args.seed),
+    ]
+    if args.load_in_4bit:
+        values.append("--load-in-4bit")
+    if args.local_files_only:
+        values.append("--local-files-only")
+    if args.gradient_checkpointing:
+        values.append("--gradient-checkpointing")
+    return build_train_parser().parse_args(values)
+
+
+def _evaluate_checkpoint(
+    args: argparse.Namespace,
+    checkpoint: str,
+) -> dict[str, Any]:
+    adapter = args.output_dir / checkpoint
+    report_path = args.output_dir / "reports" / f"{checkpoint}-validation.json"
+    values = [
+        "--model",
+        args.model,
+        "--adapter",
+        str(adapter),
+        "--data-file",
+        str(args.validation_file),
+        "--max-examples",
+        str(args.evaluation_examples),
+        "--batch-size",
+        str(args.eval_batch_size),
+        "--sample-mode",
+        "hash",
+        "--sample-seed",
+        str(args.seed),
+        "--scoring",
+        "auto",
+        "--prompt-format",
+        "auto",
+        "--max-length",
+        str(args.max_length),
+        "--attn-implementation",
+        args.attn_implementation,
+        "--output",
+        str(report_path),
+        "--log-every",
+        str(args.evaluation_log_every),
+    ]
+    if args.load_in_4bit:
+        values.append("--load-in-4bit")
+    if args.local_files_only:
+        values.append("--local-files-only")
+    report = evaluate(build_evaluate_parser().parse_args(values))
+    _release_model_memory()
+    return report
+
+
+def _summary_metrics(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "accuracy": report["accuracy"],
+        "top_k_accuracy": report["top_k_accuracy"],
+        "mean_reciprocal_rank": report["mean_reciprocal_rank"],
+        "average_candidate_nll": report["average_candidate_nll"],
+        "action_type_accuracy": report["action_type_accuracy"],
+        "accuracy_by_target_kind": report["accuracy_by_target_kind"],
+        "accuracy_by_target_family": report["accuracy_by_target_family"],
+        "prediction_counts": report["prediction_counts"],
+        "target_counts": report["target_counts"],
+    }
+
+
+def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.train_file.is_file():
+        raise FileNotFoundError(args.train_file)
+    if not args.validation_file.is_file():
+        raise FileNotFoundError(args.validation_file)
+    if args.load_in_4bit and not torch.cuda.is_available():
+        raise RuntimeError("The default 4-bit experiment requires CUDA; pass --no-4bit for CPU")
+
+    print(
+        json.dumps(
+            {
+                "phase": "train",
+                "objective": args.objective,
+                "prompt_format": args.prompt_format,
+                "epochs": args.epochs,
+                "output_dir": str(args.output_dir),
+            }
+        ),
+        flush=True,
+    )
+    training = train(_train_arguments(args))
+    _release_model_memory()
+
+    reports: dict[str, dict[str, Any]] = {}
+    for checkpoint in ("best", "final"):
+        if not (args.output_dir / checkpoint).is_dir():
+            continue
+        print(json.dumps({"phase": "evaluate", "checkpoint": checkpoint}), flush=True)
+        reports[checkpoint] = _evaluate_checkpoint(args, checkpoint)
+    if not reports:
+        raise RuntimeError("Training produced no evaluable checkpoint")
+
+    selected = max(
+        reports,
+        key=lambda name: (
+            reports[name]["accuracy"],
+            -reports[name]["average_candidate_nll"],
+        ),
+    )
+    summary = {
+        "selected_checkpoint": selected,
+        "training": training,
+        "checkpoints": {
+            name: _summary_metrics(report) for name, report in reports.items()
+        },
+    }
+    summary_path = args.output_dir / "run_summary.json"
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
+    return summary
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Train one complete policy experiment, evaluate best/final, and summarize."
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--train-file", type=Path, default=Path("data/gen9ou-dev/train.jsonl"))
+    parser.add_argument(
+        "--validation-file",
+        type=Path,
+        default=Path("data/gen9ou-dev/validation.jsonl"),
+    )
+    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
+    parser.add_argument(
+        "--objective",
+        choices=("candidate-head", "policy-head"),
+        default="candidate-head",
+    )
+    parser.add_argument(
+        "--prompt-format",
+        choices=("compact-v1", "verbose-v1"),
+        default="compact-v1",
+    )
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--eval-batch-size", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=32)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--class-weighting",
+        choices=("none", "sqrt-inverse", "family-balanced"),
+        default="none",
+    )
+    parser.add_argument("--max-class-weight", type=float, default=3.0)
+    parser.add_argument("--lora-rank", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("cosine", "constant-with-warmup"),
+        default="cosine",
+    )
+    parser.add_argument("--min-lr-ratio", type=float, default=0.05)
+    parser.add_argument("--max-length", type=int, default=4096)
+    parser.add_argument("--validation-examples", type=int, default=1024)
+    parser.add_argument("--evaluation-examples", type=int, default=5000)
+    parser.add_argument("--eval-steps", type=int, default=500)
+    parser.add_argument("--log-steps", type=int, default=20)
+    parser.add_argument("--evaluation-log-every", type=int, default=100)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16"), default="auto")
+    parser.add_argument(
+        "--attn-implementation",
+        choices=("auto", "eager", "sdpa", "flash_attention_2"),
+        default="sdpa",
+    )
+    parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--no-4bit", action="store_false", dest="load_in_4bit")
+    parser.add_argument("--allow-download", action="store_false", dest="local_files_only")
+    parser.set_defaults(load_in_4bit=True, local_files_only=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    run_experiment(build_parser().parse_args(argv))
+
+
+if __name__ == "__main__":
+    main()

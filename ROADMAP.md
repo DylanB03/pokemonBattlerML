@@ -77,9 +77,11 @@ Implemented:
 - Battle-grouped and chronological dataset splits.
 - Turn-level Generation 9 OU behavior-cloning examples.
 - Legal-action validation and constrained inference.
-- Full SFT, LoRA, and 4-bit QLoRA support.
-- A policy scorer that returns a score for every legal action.
-- Offline evaluation against recorded human actions.
+- Full SFT, fixed policy-head, shared candidate-head, LoRA, and 4-bit QLoRA support.
+- Compact and verbose versioned prompt serializers.
+- A legally masked policy scorer that returns a score for every candidate.
+- Deterministic offline ranking, family, entropy, and action-agreement evaluation.
+- One-command full-pass training plus best/final evaluation and reporting.
 
 Not yet implemented:
 
@@ -99,10 +101,12 @@ Deliverables:
 
 - Complete the high-rated Generation 9 OU development dataset.
 - Pass the 128-example memorization test.
-- Run the planned hyperparameter search.
-- Train and select the first main SFT checkpoint.
-- Report held-out action agreement, action-type accuracy, legality, and
-  top-action margins.
+- Train the first complete-pass compact candidate-head checkpoint.
+- Use its learning curves to decide whether a second pass or controlled weighting
+  comparison is warranted.
+- Report held-out action agreement, action-type accuracy, replay-candidate
+  constraint coverage, and top-action margins. Measure true legality only under
+  the live simulator mask.
 - Evaluate the selected policy in simulated battles against fixed opponents.
 
 Exit criteria:

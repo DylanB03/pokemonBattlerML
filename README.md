@@ -1,4 +1,4 @@
-# Pokémon Battler SFT Harness
+# Pokémon Battler Policy-Training Harness
 
 This repository fine-tunes a small causal language model to choose actions in
 Generation 9 OU Pokémon battles. It converts Metamon replay trajectories into
@@ -15,7 +15,39 @@ See [ROADMAP.md](ROADMAP.md) for the planned progression from behavior cloning
 to model-preference displays, replay review, counterfactual win-probability
 analysis, regret estimation, and grounded coaching.
 
-## Recommended experiment
+For the development story behind the current objective and experiment design,
+read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
+
+## Run the recommended experiment
+
+With the existing `data/gen9ou-dev` split and cached Qwen checkpoint, this one
+command trains for one complete dataset pass, evaluates `best/` and `final/` on
+the same 5,000 hash-sampled validation rows, and writes a comparison summary:
+
+```bash
+.venv/bin/python -m pokemon_battler.experiment \
+  --output-dir outputs/candidate-compact-1epoch
+```
+
+The defaults are candidate-wise legal-action cross-entropy, the compact prompt,
+QLoRA, effective batch 32, SDPA, a cosine schedule with a 5% floor, and seed 42.
+No `--max-steps` is used, so the 286,059-row training split produces about 8,940
+optimizer updates. Results are saved to:
+
+```text
+outputs/candidate-compact-1epoch/best/
+outputs/candidate-compact-1epoch/final/
+outputs/candidate-compact-1epoch/history.json
+outputs/candidate-compact-1epoch/reports/best-validation.json
+outputs/candidate-compact-1epoch/reports/final-validation.json
+outputs/candidate-compact-1epoch/run_summary.json
+```
+
+This command requires CUDA for its default 4-bit configuration. After an
+editable reinstall, `pokemon-run --output-dir ...` is the equivalent entry
+point.
+
+## Experiment protocol
 
 This is the default protocol for one 8 GB NVIDIA GPU:
 
@@ -24,9 +56,9 @@ This is the default protocol for one 8 GB NVIDIA GPU:
 | Environment check | Unit tests and cached model | Verify the installation | All tests pass and CUDA is visible |
 | Data development set | 2% deterministic turn sample | Retain battle diversity at manageable cost | At least 50k train and 5k validation rows |
 | Memorization gate | 128 rows, at most 400 updates | Detect broken labels, masking, LoRA, or loading | At least 95% accuracy on the same 128 rows |
-| Hyperparameter search | Six runs, 2,000 updates each | Select learning rate, LoRA rank, and dropout | Best validation action accuracy |
-| Main data | 10% deterministic turn sample | Scale the selected configuration | Reinspect lengths before training |
-| Main SFT | Up to three passes or 20k updates | Produce the SFT checkpoint | Select `best/`, not automatically `final/` |
+| First model | One complete pass, about 8,940 updates | Test the aligned candidate objective | Best hash-sampled validation action accuracy |
+| Main data | 10% deterministic turn sample | Scale only after the first result is sound | Reinspect lengths before training |
+| Main policy | One to three complete passes | Produce the selected checkpoint | Compare `best/` and `final/` |
 | Final offline test | 5,000 held-out test rows | Report imitation performance once | Compare base and trained policies |
 | Battle evaluation | Fixed teams and opponents | Measure actual policy quality | Win rate with confidence intervals |
 
@@ -71,13 +103,150 @@ command in this guide includes both arguments and therefore performs QLoRA.
 - Removal of missing, terminal, and unrecoverably illegal replay labels
 - Dynamic switch options as Pokémon faint
 - Assistant-only causal-LM loss on the action ID and EOS tokens
+- A directly legal-masked 13-way policy-head objective that avoids action-label
+  tokenization bias
+- A shared candidate head that scores each legal action description with the
+  same network and randomizes candidate order during training
+- A compact prompt whose measured median is 1,157 tokens instead of 2,057
+- Validation action NLL, top-k accuracy, MRR, action-family metrics, entropy,
+  prediction histograms, and best-checkpoint selection by action accuracy
+- Full-epoch scheduler semantics, a configurable LR floor, gradient diagnostics,
+  examples/tokens per second, and dataset-pass reporting
+- Optional capped class/family weighting
+- A single-command train/evaluate/report experiment runner
+- Preparation-time turn/player counts, past opponent reveals without future
+  leakage, and conservative zero-PP mask refinement
 - Full fine-tuning, LoRA, and 4-bit QLoRA loading
-- Best-checkpoint selection by validation loss
+- Best-checkpoint selection by validation action accuracy for action heads, with
+  action NLL as the tiebreaker; legacy SFT still uses token loss
 - Memory-bounded constrained evaluation that cannot select an illegal replay
-  action
+  candidate
+- Reproducible hash-sampled evaluation with uniform, training-frequency, top-k,
+  reciprocal-rank, action-type, and oracle-type metrics
+- A compact feature-hashed action network as a non-language-model baseline
 
 `prompt.md` is a human-readable example. The authoritative serializer is
 `src/pokemon_battler/prompting.py`.
+
+## Policy objectives and baselines
+
+The original `--objective sft` path trains Qwen to generate strings such as
+`A4`, then compares complete legal action strings during inference.
+
+The `--objective policy-head` path reads the final prompt representation and
+produces exactly 13 logits. Before cross-entropy or prediction, every entry
+outside `legal_action_ids` is set to negative infinity. Illegal replay candidates
+therefore receive zero probability and cannot be selected. This also removes the
+different Qwen token lengths of `A0` and `A10` from the learning objective.
+
+The recommended `--objective candidate-head` path records the hidden state at
+each legal-action description and applies one shared MLP scorer to all of them.
+It uses the same legal mask, but makes the score depend directly on the candidate
+semantics instead of a permanently assigned A0-A12 output weight. Candidate
+order is randomized during training to reduce position shortcuts.
+
+A direct training command equivalent to the training phase of `pokemon-run` is:
+
+```bash
+pokemon-train \
+  --model Qwen/Qwen2.5-0.5B \
+  --train-file data/gen9ou-dev/train.jsonl \
+  --validation-file data/gen9ou-dev/validation.jsonl \
+  --output-dir outputs/candidate-compact-1epoch \
+  --objective candidate-head \
+  --prompt-format compact-v1 \
+  --method lora \
+  --local-files-only \
+  --load-in-4bit \
+  --dtype auto \
+  --batch-size 1 \
+  --gradient-accumulation-steps 32 \
+  --learning-rate 1e-4 \
+  --epochs 1 \
+  --min-lr-ratio 0.05 \
+  --validation-examples 1024 \
+  --validation-sample-mode hash \
+  --validation-sample-seed 42 \
+  --eval-steps 500
+```
+
+`pokemon-evaluate` automatically detects a saved policy head. To evaluate the
+unfine-tuned base model with the existing legal-candidate mask on a deterministic
+sample of any size, omit `--adapter`:
+
+```bash
+pokemon-evaluate \
+  --model Qwen/Qwen2.5-0.5B \
+  --data-file data/gen9ou-dev/validation.jsonl \
+  --max-examples 1000 \
+  --sample-mode hash \
+  --sample-seed 42 \
+  --baseline-train-file data/gen9ou-dev/train.jsonl \
+  --local-files-only \
+  --load-in-4bit \
+  --output reports/base-validation-1000.json
+```
+
+Use the identical row count, sample mode, and seed for every checkpoint. Reports
+record the selected-index digest and date coverage and include:
+
+- uniform legal-action and training-frequency baselines;
+- end-to-end and move-versus-switch accuracy;
+- explicitly labeled oracle-type accuracy;
+- top-1/top-2/top-3 accuracy and mean reciprocal rank;
+- candidate-set NLL, entropy, and top-action margin;
+- ordinary-move, switch, and Terastallized-move slices.
+
+Train the compact non-language-model baseline on the same chronological data:
+
+```bash
+pokemon-baseline static \
+  --data-file data/gen9ou-dev/validation.jsonl \
+  --baseline-train-file data/gen9ou-dev/train.jsonl \
+  --max-examples 5000 \
+  --sample-mode hash \
+  --sample-seed 42 \
+  --output reports/static-baselines-validation.json
+
+pokemon-baseline train \
+  --train-file data/gen9ou-dev/train.jsonl \
+  --validation-file data/gen9ou-dev/validation.jsonl \
+  --output-dir outputs/hashed-action-baseline \
+  --max-train-examples 100000 \
+  --max-validation-examples 5000 \
+  --sample-mode hash
+
+pokemon-baseline evaluate \
+  --checkpoint outputs/hashed-action-baseline/best \
+  --data-file data/gen9ou-dev/validation.jsonl \
+  --max-examples 5000 \
+  --sample-mode hash \
+  --sample-seed 42 \
+  --baseline-train-file data/gen9ou-dev/train.jsonl \
+  --output reports/hashed-action-baseline-validation.json
+```
+
+This model embeds deterministic hashes of structured state and candidate-action
+features and scores their interaction with a small network. It is not a language
+model, uses the same legal mask, and tests whether the 0.5B causal model earns its
+additional cost.
+
+### Selective logits
+
+Masking labels with `-100` prevents prompt tokens from contributing to causal-LM
+loss, but a normal causal-LM forward pass can still project every prompt hidden
+state through Qwen's 151,936-column vocabulary head. Selective logits ask Qwen to
+perform that projection only at the three or four positions that predict the
+action label and EOS. The transformer still processes the complete prompt; this
+removes unnecessary vocabulary projection, not attention or MLP work.
+
+The default `--loss-projection auto` uses selective projection when supported.
+`--loss-projection selective` requires it. For a controlled SFT benchmark,
+compare it with `--loss-projection full` in separate processes using identical
+examples and sequence lengths. Compare synchronized examples/second and peak
+allocated VRAM, not only `nvidia-smi` or reserved allocator memory. The policy
+head does not need this comparison because it replaces the vocabulary head with
+13 outputs.
 
 ## 1. Install and verify the environment
 
@@ -230,6 +399,15 @@ If real prompts exceed 4096, first make the serializer more compact and rerun
 the inspection. Increasing context beyond 4096 is the last option on an 8 GB
 GPU.
 
+## Legacy causal-LM experiment protocol
+
+The remaining numbered sections document the original generative-SFT research
+protocol. They are retained for reproducibility, but they are not the current
+recommended run and some of their budgets intentionally describe the old
+objective. Use the one-command candidate-head experiment at the top of this
+README for the next model run. When reproducing a command in this legacy
+section, add `--objective sft --prompt-format verbose-v1` explicitly.
+
 ## 4. Record the unfine-tuned validation baseline
 
 This establishes whether SFT adds value over the pretrained model:
@@ -349,7 +527,8 @@ do
 done
 ```
 
-Each run automatically saves the lowest-validation-loss adapter under `best/`.
+For the legacy SFT objective, each run saves the lowest-validation-loss adapter
+under `best/`.
 Evaluate those three adapters on the same 2,000 validation rows:
 
 ```bash
@@ -601,7 +780,7 @@ Replace the four exported defaults with the measured development winners. The
 cosine schedule spans the calculated main budget. The trainer saves:
 
 ```text
-outputs/qwen25-05b-main/best/   lowest sampled validation loss
+outputs/qwen25-05b-main/best/   selected validation checkpoint
 outputs/qwen25-05b-main/final/  parameters at the last update
 outputs/qwen25-05b-main/history.json
 ```

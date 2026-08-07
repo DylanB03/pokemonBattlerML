@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import tarfile
@@ -10,7 +11,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator, Sequence
 
-from pokemon_battler.actions import action_label, legal_action_ids
+from pokemon_battler.actions import (
+    action_label,
+    pp_aware_legal_action_ids,
+    recoverable_legal_action_ids,
+)
 
 SUPPORTED_FILE_SUFFIXES = (".json", ".json.lz4")
 SUPPORTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz")
@@ -230,6 +235,119 @@ def _format_matches(trajectory: dict[str, Any], wanted_format: str | None) -> bo
     return observed == wanted_format.replace(" ", "").lower()
 
 
+def _known_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.lower() not in {
+            "",
+            "unknown",
+            "unknownitem",
+            "unknownability",
+            "notype",
+            "nomove",
+        }
+    return True
+
+
+def _merge_revealed_pokemon(
+    previous: dict[str, Any] | None,
+    observed: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge only information already visible by the current decision."""
+    merged = copy.deepcopy(previous) if previous is not None else {}
+    for key, value in observed.items():
+        if key == "moves":
+            continue
+        if _known_value(value):
+            merged[key] = copy.deepcopy(value)
+    moves_by_name = {
+        str(move.get("name", "")).lower(): copy.deepcopy(move)
+        for move in merged.get("moves", [])
+        if isinstance(move, dict) and _known_value(move.get("name"))
+    }
+    for move in observed.get("moves") or []:
+        if not isinstance(move, dict) or not _known_value(move.get("name")):
+            continue
+        name = str(move["name"]).lower()
+        combined_move = moves_by_name.get(name, {})
+        for key, value in move.items():
+            if _known_value(value):
+                combined_move[key] = copy.deepcopy(value)
+        moves_by_name[name] = combined_move
+    merged["moves"] = list(moves_by_name.values())
+    return merged
+
+
+def _observe_opponent(
+    state: dict[str, Any],
+    revealed_opponents: dict[str, dict[str, Any]],
+) -> None:
+    opponent = state.get("opponent_active_pokemon") or {}
+    opponent_name = str(opponent.get("name", "")).lower()
+    if opponent_name:
+        revealed_opponents[opponent_name] = _merge_revealed_pokemon(
+            revealed_opponents.get(opponent_name),
+            opponent,
+        )
+
+
+def _observe_move_history(
+    state: dict[str, Any],
+    recent_moves: list[dict[str, str]],
+) -> None:
+    def move_name(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("name") or "nomove")
+        return str(value or "nomove")
+
+    entry = {
+        "player": move_name(state.get("player_prev_move")),
+        "opponent": move_name(state.get("opponent_prev_move")),
+    }
+    if entry == {"player": "nomove", "opponent": "nomove"}:
+        return
+    if not recent_moves or recent_moves[-1] != entry:
+        recent_moves.append(entry)
+        del recent_moves[:-4]
+
+
+def _enrich_state(
+    state: dict[str, Any],
+    turn_index: int,
+    revealed_opponents: dict[str, dict[str, Any]],
+    recent_moves: list[dict[str, str]],
+) -> dict[str, Any]:
+    enriched = copy.deepcopy(state)
+    enriched["turn_index"] = turn_index
+    active = enriched.get("player_active_pokemon") or {}
+    active_alive = float(active.get("hp_pct", 0) or 0) > 0 and active.get("status") != "fnt"
+    enriched["player_remaining"] = len(enriched.get("available_switches") or []) + int(
+        active_alive
+    )
+    enriched["opponent_revealed_pokemon"] = [
+        copy.deepcopy(revealed_opponents[name]) for name in sorted(revealed_opponents)
+    ]
+    enriched["recent_move_history"] = copy.deepcopy(recent_moves)
+    return enriched
+
+
+def _explicit_legal_actions(
+    state: dict[str, Any],
+    recoverable: list[int],
+) -> list[int] | None:
+    for key in ("legal_action_ids", "valid_action_ids"):
+        values = state.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        if not all(isinstance(value, int) for value in values):
+            continue
+        legal = sorted(set(values))
+        if set(legal).issubset(recoverable):
+            return legal
+    return None
+
+
 def _trajectory_rows(
     source_name: str,
     trajectory: dict[str, Any],
@@ -252,29 +370,51 @@ def _trajectory_rows(
     if len(actions) < len(states) - 1:
         counters["length_mismatches"] += 1
 
+    revealed_opponents: dict[str, dict[str, Any]] = {}
+    recent_moves: list[dict[str, str]] = []
+
     # Metamon deliberately pairs states[:-1] with actions[:-1]. The final state
     # is terminal and has no decision target.
     for turn_index, (state, action_id) in enumerate(zip(states[:-1], actions[:-1])):
         if not isinstance(state, dict) or not isinstance(action_id, int):
             counters["malformed_turns"] += 1
             continue
+        _observe_opponent(state, revealed_opponents)
+        _observe_move_history(state, recent_moves)
         if action_id == -1:
             counters["missing_actions"] += 1
             continue
 
         try:
-            legal = legal_action_ids(state)
+            recoverable_legal = recoverable_legal_action_ids(state)
+            pp_aware_legal = pp_aware_legal_action_ids(state)
         except (KeyError, TypeError, ValueError):
             counters["invalid_states"] += 1
             continue
-        if action_id not in legal:
+        if action_id not in recoverable_legal:
             counters["actions_not_recoverably_legal"] += 1
             continue
+        explicit_legal = _explicit_legal_actions(state, recoverable_legal)
+        if explicit_legal is not None and action_id in explicit_legal:
+            legal = explicit_legal
+            legal_mask_quality = "exact"
+            counters["exact_legal_masks"] += 1
+        elif action_id in pp_aware_legal and pp_aware_legal != recoverable_legal:
+            legal = pp_aware_legal
+            legal_mask_quality = "pp-aware"
+            counters["zero_pp_candidates_removed"] += len(recoverable_legal) - len(legal)
+        else:
+            legal = recoverable_legal
+            legal_mask_quality = "recoverable"
         if not _sample_is_selected(metadata.battle_id, turn_index, seed, sample_rate):
             counters["sampled_out"] += 1
             continue
 
+        state = _enrich_state(state, turn_index, revealed_opponents, recent_moves)
+        state["prepared_legal_action_ids"] = legal
+
         yield {
+            "schema_version": 2,
             "battle_id": metadata.battle_id,
             "battle_date": metadata.battle_date.isoformat() if metadata.battle_date else None,
             "rating": metadata.rating,
@@ -286,6 +426,7 @@ def _trajectory_rows(
             "action_id": action_id,
             "target": action_label(action_id),
             "legal_action_ids": legal,
+            "legal_mask_quality": legal_mask_quality,
         }
 
 
@@ -426,6 +567,7 @@ def prepare_dataset(
         raise AssertionError(f"Battle-level split leakage detected for {len(overlap)} battles")
 
     report = {
+        "schema_version": 2,
         "inputs": [str(path) for path in inputs],
         "output_dir": str(output_dir),
         "battle_format": battle_format,

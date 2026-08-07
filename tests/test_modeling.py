@@ -9,6 +9,9 @@ import torch
 from pokemon_battler.modeling import (
     assistant_only_loss,
     indexed_logits_parameter,
+    masked_candidate_logits,
+    masked_policy_logits,
+    policy_head_loss,
     score_legal_actions,
 )
 from tests.helpers import state
@@ -66,6 +69,23 @@ class IndexedLossModel:
     __call__ = forward
 
 
+class HiddenStateModel:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        output_hidden_states: bool,
+        use_cache: bool,
+        logits_to_keep: int,
+    ) -> SimpleNamespace:
+        del attention_mask, use_cache
+        self.assertions = (output_hidden_states, logits_to_keep)
+        hidden = torch.nn.functional.one_hot(input_ids % 4, num_classes=4).float()
+        return SimpleNamespace(hidden_states=(hidden,))
+
+    __call__ = forward
+
+
 class ModelingTests(unittest.TestCase):
     def test_action_scoring_requests_only_suffix_logits(self) -> None:
         model = LimitedLogitsModel()
@@ -97,6 +117,77 @@ class ModelingTests(unittest.TestCase):
         self.assertEqual(model.positions.tolist(), [2, 3])
         self.assertAlmostEqual(float(loss.item()), math.log(10), places=5)
         loss.backward()
+
+    def test_policy_head_removes_illegal_logits_before_loss(self) -> None:
+        model = HiddenStateModel()
+        head = torch.nn.Linear(4, 13, bias=False)
+        torch.nn.init.zeros_(head.weight)
+        with torch.no_grad():
+            head.weight[1, 2] = 3.0
+            head.weight[5, 2] = 100.0
+        batch = {
+            "input_ids": torch.tensor([[0, 2, 0]]),
+            "attention_mask": torch.tensor([[1, 1, 0]]),
+            "action_ids": torch.tensor([1]),
+            "legal_action_mask": torch.tensor(
+                [
+                    [
+                        False,
+                        True,
+                        True,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                    ]
+                ]
+            ),
+        }
+        logits = masked_policy_logits(
+            model,
+            head,
+            batch,
+            logits_parameter="logits_to_keep",
+        )
+        self.assertEqual(model.assertions, (True, 1))
+        self.assertTrue(torch.isneginf(logits[0, 5]))
+        self.assertEqual(int(logits.argmax(dim=1).item()), 1)
+        loss = policy_head_loss(
+            model,
+            head,
+            batch,
+            logits_parameter="logits_to_keep",
+        )
+        self.assertLess(float(loss.item()), 0.1)
+
+    def test_candidate_head_shares_scorer_and_masks_illegal_logits(self) -> None:
+        model = HiddenStateModel()
+        scorer = torch.nn.Linear(4, 1, bias=False)
+        torch.nn.init.zeros_(scorer.weight)
+        with torch.no_grad():
+            scorer.weight[0, 2] = 3.0
+        batch = {
+            "input_ids": torch.tensor([[0, 1, 2, 3]]),
+            "attention_mask": torch.ones((1, 4), dtype=torch.long),
+            "candidate_positions": torch.tensor([[-1, 2, 1] + [-1] * 10]),
+            "legal_action_mask": torch.tensor(
+                [[False, True, True] + [False] * 10]
+            ),
+        }
+        logits = masked_candidate_logits(
+            model,
+            scorer,
+            batch,
+            logits_parameter="logits_to_keep",
+        )
+        self.assertEqual(int(logits.argmax(dim=1).item()), 1)
+        self.assertTrue(torch.isneginf(logits[0, 0]))
 
 
 if __name__ == "__main__":

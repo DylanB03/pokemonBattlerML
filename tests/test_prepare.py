@@ -102,6 +102,54 @@ class PrepareTests(unittest.TestCase):
             ]
             self.assertEqual(rows[0]["target"], "A0")
             self.assertIn(0, rows[0]["legal_action_ids"])
+            self.assertEqual(rows[0]["state"]["turn_index"], 0)
+            self.assertEqual(rows[0]["state"]["player_remaining"], 3)
+            self.assertEqual(rows[0]["legal_mask_quality"], "recoverable")
+            self.assertEqual(
+                rows[0]["state"]["recent_move_history"],
+                [{"player": "protect", "opponent": "saltcure"}],
+            )
+
+    def test_preparation_history_does_not_leak_future_reveals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_dir = root / "raw"
+            raw_dir.mkdir()
+            first = state()
+            second = state()
+            second["opponent_active_pokemon"]["name"] = "dragapult"
+            second["opponent_active_pokemon"]["base_species"] = "dragapult"
+            trajectory = {
+                "states": [first, second, terminal_state()],
+                "actions": [0, 0, -1],
+            }
+            source = raw_dir / "battle-9_1800_a_vs_b_01-02-2025_WIN.json"
+            source.write_text(json.dumps(trajectory), encoding="utf-8")
+            prepare_dataset(
+                [raw_dir],
+                root / "prepared",
+                split_config=SplitConfig(
+                    mode="chronological",
+                    validation_start=date(2025, 2, 1),
+                    test_start=date(2025, 3, 1),
+                ),
+            )
+            rows = [
+                json.loads(line)
+                for line in (root / "prepared" / "train.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            first_names = {
+                pokemon["name"]
+                for pokemon in rows[0]["state"]["opponent_revealed_pokemon"]
+            }
+            second_names = {
+                pokemon["name"]
+                for pokemon in rows[1]["state"]["opponent_revealed_pokemon"]
+            }
+            self.assertNotIn("dragapult", first_names)
+            self.assertIn("dragapult", second_names)
 
 
 if __name__ == "__main__":
