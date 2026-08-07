@@ -10,7 +10,19 @@ from safetensors.torch import load_file as load_safetensors
 from safetensors.torch import save_file as save_safetensors
 
 from pokemon_battler.actions import ACTION_COUNT, action_label, legal_action_ids
-from pokemon_battler.mechanics import MECHANICS_FEATURE_COUNT, candidate_feature_matrix
+from pokemon_battler.mechanics import (
+    MECHANICS_FEATURE_COUNT as LEGACY_MECHANICS_FEATURE_COUNT,
+    MECHANICS_SCHEMA as LEGACY_MECHANICS_SCHEMA,
+    candidate_feature_matrix as legacy_candidate_feature_matrix,
+)
+from pokemon_battler.mechanics_v2 import (
+    MECHANICS_FEATURE_COUNT,
+    MECHANICS_IDENTITY_FIELDS,
+    MECHANICS_IDENTITY_VOCAB_SIZES,
+    MECHANICS_SCHEMA,
+    candidate_feature_matrix,
+    candidate_identity_matrix,
+)
 from pokemon_battler.prompting import encode_candidate_prompt, render_prompt
 
 POLICY_HEAD_FILENAME = "policy_head.safetensors"
@@ -35,22 +47,51 @@ class CandidateHead(torch.nn.Module):
 
 
 class MechanicsHead(torch.nn.Module):
-    """Fuse one state representation with a numeric vector for every action."""
+    """Fuse one state representation with numeric and categorical action mechanics."""
 
-    def __init__(self, hidden_size: int, feature_count: int = MECHANICS_FEATURE_COUNT) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        *,
+        schema: str = MECHANICS_SCHEMA,
+    ) -> None:
         super().__init__()
+        if schema not in {LEGACY_MECHANICS_SCHEMA, MECHANICS_SCHEMA}:
+            raise ValueError(f"Unsupported mechanics schema: {schema!r}")
+        feature_count = (
+            LEGACY_MECHANICS_FEATURE_COUNT
+            if schema == LEGACY_MECHANICS_SCHEMA
+            else MECHANICS_FEATURE_COUNT
+        )
         mechanics_size = max(min(hidden_size // 4, 256), 64)
         scoring_size = max(hidden_size // 2, 128)
         self.hidden_size = hidden_size
+        self.schema = schema
         self.feature_count = feature_count
+        self.identity_fields = (
+            () if schema == LEGACY_MECHANICS_SCHEMA else MECHANICS_IDENTITY_FIELDS
+        )
+        self.identity_embedding_size = max(min(hidden_size // 64, 16), 8)
+        namespaces = {namespace for _, namespace in self.identity_fields}
+        self.identity_embeddings = torch.nn.ModuleDict(
+            {
+                f"namespace_{namespace}": torch.nn.Embedding(
+                    MECHANICS_IDENTITY_VOCAB_SIZES[namespace],
+                    self.identity_embedding_size,
+                    padding_idx=0,
+                )
+                for namespace in sorted(namespaces)
+            }
+        )
         self.state_norm = torch.nn.LayerNorm(hidden_size)
         self.mechanics_encoder = torch.nn.Sequential(
             torch.nn.Linear(feature_count, mechanics_size),
             torch.nn.GELU(),
             torch.nn.LayerNorm(mechanics_size),
         )
+        identity_size = len(self.identity_fields) * self.identity_embedding_size
         self.scorer = torch.nn.Sequential(
-            torch.nn.Linear(hidden_size + mechanics_size, scoring_size),
+            torch.nn.Linear(hidden_size + mechanics_size + identity_size, scoring_size),
             torch.nn.GELU(),
             torch.nn.Linear(scoring_size, 1),
         )
@@ -59,6 +100,7 @@ class MechanicsHead(torch.nn.Module):
         self,
         state_hidden: torch.Tensor,
         mechanics_features: torch.Tensor,
+        mechanics_identity_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if mechanics_features.ndim != 3 or mechanics_features.shape[1:] != (
             ACTION_COUNT,
@@ -71,7 +113,22 @@ class MechanicsHead(torch.nn.Module):
         state = self.state_norm(state_hidden.float())
         mechanics = self.mechanics_encoder(mechanics_features.float())
         expanded_state = state[:, None, :].expand(-1, ACTION_COUNT, -1)
-        return self.scorer(torch.cat((expanded_state, mechanics), dim=-1)).squeeze(-1)
+        parts = [expanded_state, mechanics]
+        if self.identity_fields:
+            expected = (state_hidden.shape[0], ACTION_COUNT, len(self.identity_fields))
+            if mechanics_identity_ids is None or tuple(mechanics_identity_ids.shape) != expected:
+                raise ValueError(
+                    "MechanicsHead expects identity IDs shaped "
+                    f"[batch, {ACTION_COUNT}, {len(self.identity_fields)}]"
+                )
+            identities = [
+                self.identity_embeddings[f"namespace_{namespace}"](
+                    mechanics_identity_ids[:, :, index]
+                )
+                for index, (_, namespace) in enumerate(self.identity_fields)
+            ]
+            parts.append(torch.cat(identities, dim=-1))
+        return self.scorer(torch.cat(parts, dim=-1)).squeeze(-1)
 
 
 def _resolve_cached_path(model_name_or_path: str, local_files_only: bool) -> str:
@@ -279,13 +336,25 @@ def create_candidate_head(model: Any, device: torch.device) -> CandidateHead:
     return head
 
 
-def create_mechanics_head(model: Any, device: torch.device) -> MechanicsHead:
-    head = MechanicsHead(int(model.config.hidden_size)).to(device=device, dtype=torch.float32)
+def create_mechanics_head(
+    model: Any,
+    device: torch.device,
+    *,
+    schema: str = MECHANICS_SCHEMA,
+) -> MechanicsHead:
+    head = MechanicsHead(int(model.config.hidden_size), schema=schema).to(
+        device=device,
+        dtype=torch.float32,
+    )
     for module in head.modules():
         if isinstance(module, torch.nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, torch.nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.padding_idx is not None:
+                torch.nn.init.zeros_(module.weight[module.padding_idx])
     return head
 
 
@@ -358,7 +427,15 @@ def load_mechanics_head(
     path = Path(adapter_path) / MECHANICS_HEAD_FILENAME
     if not path.is_file():
         raise FileNotFoundError(f"Mechanics-head checkpoint does not exist: {path}")
-    head = create_mechanics_head(model, device)
+    metadata = load_training_metadata(adapter_path)
+    schema = str(metadata.get("mechanics_schema", LEGACY_MECHANICS_SCHEMA))
+    if schema == MECHANICS_SCHEMA:
+        recorded_vocabs = metadata.get("mechanics_identity_vocab_sizes")
+        if recorded_vocabs is not None and recorded_vocabs != MECHANICS_IDENTITY_VOCAB_SIZES:
+            raise ValueError(
+                "Mechanics checkpoint identity vocabularies do not match this code"
+            )
+    head = create_mechanics_head(model, device, schema=schema)
     head.load_state_dict(load_safetensors(path, device=str(device)))
     return head
 
@@ -464,7 +541,13 @@ def masked_mechanics_logits(
     rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
     state_hidden = hidden_states[rows, last_positions]
     features = batch["mechanics_features"].to(hidden_states.device)
-    logits = mechanics_head(state_hidden, features)
+    identity_ids = batch.get("mechanics_identity_ids")
+    if identity_ids is not None:
+        identity_ids = identity_ids.to(hidden_states.device)
+    if identity_ids is None:
+        logits = mechanics_head(state_hidden, features)
+    else:
+        logits = mechanics_head(state_hidden, features, identity_ids)
     legal_mask = batch["legal_action_mask"].to(hidden_states.device, dtype=torch.bool)
     if logits.shape != legal_mask.shape:
         raise ValueError("Mechanics head must return one score per action candidate")
@@ -616,8 +699,10 @@ def score_mechanics_head_actions(
     device: torch.device,
     *,
     max_length: int = 4096,
-    prompt_format: str = "mechanics-v1",
+    prompt_format: str | None = None,
 ) -> dict[int, float]:
+    if prompt_format is None:
+        prompt_format = mechanics_head.schema
     prompt_ids = tokenizer.encode(
         render_prompt(state, prompt_format),
         add_special_tokens=True,
@@ -629,16 +714,27 @@ def score_mechanics_head_actions(
     legal = legal_action_ids(state)
     legal_mask = torch.zeros((1, ACTION_COUNT), dtype=torch.bool, device=device)
     legal_mask[0, legal] = True
-    batch = {
+    feature_builder = (
+        legacy_candidate_feature_matrix
+        if mechanics_head.schema == LEGACY_MECHANICS_SCHEMA
+        else candidate_feature_matrix
+    )
+    batch: dict[str, torch.Tensor] = {
         "input_ids": torch.tensor([prompt_ids], dtype=torch.long, device=device),
         "attention_mask": torch.ones((1, len(prompt_ids)), dtype=torch.long, device=device),
         "legal_action_mask": legal_mask,
         "mechanics_features": torch.tensor(
-            [candidate_feature_matrix(state)],
+            [feature_builder(state)],
             dtype=torch.float32,
             device=device,
         ),
     }
+    if mechanics_head.schema == MECHANICS_SCHEMA:
+        batch["mechanics_identity_ids"] = torch.tensor(
+            [candidate_identity_matrix(state)],
+            dtype=torch.long,
+            device=device,
+        )
     logits = masked_mechanics_logits(
         model,
         mechanics_head,

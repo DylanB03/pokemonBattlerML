@@ -92,7 +92,7 @@ class CollatorTests(unittest.TestCase):
         self.assertTrue(torch.all(positions[[0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12]] == -1))
         self.assertLess(int(positions.max()), int(batch["attention_mask"].sum()))
 
-    def test_mechanics_collator_adds_features_without_candidate_text(self) -> None:
+    def test_mechanics_collator_adds_numeric_and_identity_features(self) -> None:
         collator = MechanicsCollator(FakeTokenizer(), max_length=20_000)
         batch = collator(
             [
@@ -104,6 +104,7 @@ class CollatorTests(unittest.TestCase):
             ]
         )
         self.assertEqual(batch["mechanics_features"].shape[:2], (1, 13))
+        self.assertEqual(batch["mechanics_identity_ids"].shape[:2], (1, 13))
         self.assertEqual(batch["action_ids"].tolist(), [4])
         self.assertEqual(
             torch.nonzero(batch["legal_action_mask"][0], as_tuple=False).flatten().tolist(),

@@ -10,6 +10,7 @@ import torch
 
 from pokemon_battler.evaluate import build_parser as build_evaluate_parser
 from pokemon_battler.evaluate import evaluate
+from pokemon_battler.mechanics_v2 import MECHANICS_SCHEMA
 from pokemon_battler.mechanics_cache import build_feature_cache, default_cache_path
 from pokemon_battler.train import build_parser as build_train_parser
 from pokemon_battler.train import train
@@ -96,11 +97,14 @@ def _train_arguments(args: argparse.Namespace) -> argparse.Namespace:
         values.extend(
             [
                 "--train-mechanics-cache",
-                str(args.train_mechanics_cache or default_cache_path(args.train_file)),
+                str(
+                    args.train_mechanics_cache
+                    or default_cache_path(args.train_file, MECHANICS_SCHEMA)
+                ),
                 "--validation-mechanics-cache",
                 str(
                     args.validation_mechanics_cache
-                    or default_cache_path(args.validation_file)
+                    or default_cache_path(args.validation_file, MECHANICS_SCHEMA)
                 ),
             ]
         )
@@ -151,7 +155,7 @@ def _evaluate_checkpoint(
                 "--mechanics-cache",
                 str(
                     args.validation_mechanics_cache
-                    or default_cache_path(args.validation_file)
+                    or default_cache_path(args.validation_file, MECHANICS_SCHEMA)
                 ),
             ]
         )
@@ -187,7 +191,10 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             (args.train_file, args.train_mechanics_cache),
             (args.validation_file, args.validation_mechanics_cache),
         ):
-            cache_path = configured_cache or default_cache_path(data_file)
+            cache_path = configured_cache or default_cache_path(
+                data_file,
+                MECHANICS_SCHEMA,
+            )
             print(
                 json.dumps(
                     {
@@ -203,6 +210,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                 cache_path,
                 overwrite=args.rebuild_mechanics_cache,
                 progress_every=args.mechanics_cache_progress_every,
+                schema=MECHANICS_SCHEMA,
             )
 
     print(
@@ -271,8 +279,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--prompt-format",
-        choices=("mechanics-v1", "compact-v1", "verbose-v1"),
-        default="mechanics-v1",
+        choices=("mechanics-v2", "mechanics-v1", "compact-v1", "verbose-v1"),
+        default="mechanics-v2",
     )
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=1)

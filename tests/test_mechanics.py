@@ -93,10 +93,19 @@ class MechanicsTests(unittest.TestCase):
                 "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
             )
             cache = root / "tiny.mechanics-v1.npy"
-            metadata = build_feature_cache(data_file, cache, progress_every=0)
-            dataset = MechanicsCacheDataset(JsonlOffsetDataset(data_file), cache)
+            metadata = build_feature_cache(
+                data_file,
+                cache,
+                schema="mechanics-v1",
+                progress_every=0,
+            )
+            dataset = MechanicsCacheDataset(
+                JsonlOffsetDataset(data_file),
+                cache,
+                mechanics_schema="mechanics-v1",
+            )
 
-            self.assertTrue(cache_is_current(data_file, cache))
+            self.assertTrue(cache_is_current(data_file, cache, schema="mechanics-v1"))
             self.assertEqual(metadata["rows"], 2)
             self.assertEqual(dataset[0]["_mechanics_features"].shape, (13, MECHANICS_FEATURE_COUNT))
             self.assertEqual(np.load(cache, mmap_mode="r").dtype, np.float16)

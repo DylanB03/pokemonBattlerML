@@ -1,5 +1,9 @@
 # Mechanics-conditioned policy (`mechanics-v1`)
 
+> Legacy schema retained for checkpoint reproducibility. New runs default to
+> [`mechanics-v2`](mechanics-v2.md), which fixes exact candidate collisions,
+> restores compact identity signals, and adds more battle mechanics.
+
 ## Why this branch exists
 
 The candidate-head run reached 36.52% validation action agreement at step 5,000

@@ -360,7 +360,7 @@ The next hybrid run starts with one command:
 
 ```bash
 .venv/bin/python -m pokemon_battler.experiment \
-  --output-dir outputs/mechanics-v1-1epoch
+  --output-dir outputs/mechanics-v2-1epoch
 ```
 
 The command builds reusable memory-mapped mechanics caches, trains the hybrid,
@@ -373,6 +373,34 @@ I am still keeping the 0.5B model. I have also left active learning, continual
 learning, simulator RL, resume support, and model upgrades out of this phase.
 The next experiment changes the representation of facts the current model was
 being asked to relearn.
+
+## I changed the representation again after measuring its collisions
+
+The first mechanics version was too aggressive about removing identity. I had
+treated move names as a shortcut I should eliminate, then checked the actual
+vectors across the training split. In 2,880 rows, at least two legal actions had
+exactly the same 97 values. The recorded action was inside one of those tied
+groups 780 times. Rest and Sleep Talk could look identical. So could Reflect
+and Light Screen, Spikes and Stealth Rock, or two attacks whose important
+difference lived in a custom callback.
+
+No optimizer can separate two candidates when both branches receive identical
+inputs. That made this a representation bug, not another learning-rate debate.
+
+I replaced the single numeric summary with a hybrid structured candidate. It
+now has 207 numeric values for reusable mechanics and 32 categorical fields
+with learned embeddings for exact moves, species, items, abilities, types,
+statuses, effects, field state, and recent move history. I also restored compact
+move-name lists to the state prompt. The numeric branch still supplies damage,
+type effectiveness, status chances, screens, hazards, speed order, and the
+other facts I do not want Qwen to infer from a name. Identity is there for the
+exceptions that cannot honestly be compressed into one flag.
+
+This costs some prompt length and a larger feature cache, but it does not triple
+the battle prose or ask the model to perform retrieval. It gives the 0.5B model
+both kinds of signal: numbers for generalization and identities for special
+cases. The old schema remains loadable, and the new run writes to its own
+mechanics-v2 caches and output directory.
 
 If the mechanics-conditioned checkpoint improves on the 36.52% reference, I
 will compare it with the mechanics-only ablation and take the selected policy

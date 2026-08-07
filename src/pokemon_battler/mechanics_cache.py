@@ -10,19 +10,41 @@ from typing import Any, Sequence
 import numpy as np
 
 from pokemon_battler.actions import ACTION_COUNT
-from pokemon_battler.mechanics import (
-    MECHANICS_FEATURE_COUNT,
-    MECHANICS_FEATURE_NAMES,
-    MECHANICS_SCHEMA,
-    candidate_feature_matrix,
-)
+from pokemon_battler.mechanics import MECHANICS_SCHEMA as LEGACY_MECHANICS_SCHEMA
+from pokemon_battler.mechanics_v2 import MECHANICS_SCHEMA as DEFAULT_MECHANICS_SCHEMA
 from pokemon_battler.training_data import JsonlOffsetDataset, state_with_row_context
 
 
-def default_cache_path(data_file: str | Path) -> Path:
+def mechanics_spec(schema: str) -> tuple[int, tuple[str, ...], Any]:
+    if schema == LEGACY_MECHANICS_SCHEMA:
+        from pokemon_battler.mechanics import (
+            MECHANICS_FEATURE_COUNT,
+            MECHANICS_FEATURE_NAMES,
+            candidate_feature_matrix,
+        )
+
+        return MECHANICS_FEATURE_COUNT, MECHANICS_FEATURE_NAMES, candidate_feature_matrix
+    if schema == DEFAULT_MECHANICS_SCHEMA:
+        from pokemon_battler.mechanics_v2 import (
+            MECHANICS_FEATURE_COUNT,
+            MECHANICS_FEATURE_NAMES,
+            candidate_feature_matrix,
+        )
+
+        return MECHANICS_FEATURE_COUNT, MECHANICS_FEATURE_NAMES, candidate_feature_matrix
+    raise ValueError(
+        f"Unknown mechanics schema {schema!r}; choose {LEGACY_MECHANICS_SCHEMA!r} "
+        f"or {DEFAULT_MECHANICS_SCHEMA!r}"
+    )
+
+
+def default_cache_path(
+    data_file: str | Path,
+    schema: str = DEFAULT_MECHANICS_SCHEMA,
+) -> Path:
     path = Path(data_file)
     stem = path.name.removesuffix(".jsonl")
-    return path.with_name(f"{stem}.{MECHANICS_SCHEMA}.npy")
+    return path.with_name(f"{stem}.{schema}.npy")
 
 
 def _source_signature(data_file: Path, rows: int) -> dict[str, Any]:
@@ -40,7 +62,13 @@ def cache_metadata_path(cache_path: str | Path) -> Path:
     return path.with_suffix(path.suffix + ".json")
 
 
-def cache_is_current(data_file: str | Path, cache_path: str | Path) -> bool:
+def cache_is_current(
+    data_file: str | Path,
+    cache_path: str | Path,
+    *,
+    schema: str = DEFAULT_MECHANICS_SCHEMA,
+) -> bool:
+    feature_count, _, _ = mechanics_spec(schema)
     source = Path(data_file)
     cache = Path(cache_path)
     metadata_path = cache_metadata_path(cache)
@@ -49,14 +77,14 @@ def cache_is_current(data_file: str | Path, cache_path: str | Path) -> bool:
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         rows = int(metadata["rows"])
-        if metadata.get("schema") != MECHANICS_SCHEMA:
+        if metadata.get("schema") != schema:
             return False
-        if int(metadata.get("feature_count", -1)) != MECHANICS_FEATURE_COUNT:
+        if int(metadata.get("feature_count", -1)) != feature_count:
             return False
         if metadata.get("source") != _source_signature(source, rows):
             return False
         matrix = np.load(cache, mmap_mode="r")
-        return tuple(matrix.shape) == (rows, ACTION_COUNT, MECHANICS_FEATURE_COUNT)
+        return tuple(matrix.shape) == (rows, ACTION_COUNT, feature_count)
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
@@ -67,11 +95,17 @@ def build_feature_cache(
     *,
     overwrite: bool = False,
     progress_every: int = 10_000,
+    schema: str = DEFAULT_MECHANICS_SCHEMA,
 ) -> dict[str, Any]:
+    feature_count, feature_names, feature_builder = mechanics_spec(schema)
     source = Path(data_file)
-    output = Path(cache_path) if cache_path is not None else default_cache_path(source)
+    output = (
+        Path(cache_path)
+        if cache_path is not None
+        else default_cache_path(source, schema)
+    )
     metadata_path = cache_metadata_path(output)
-    if cache_is_current(source, output) and not overwrite:
+    if cache_is_current(source, output, schema=schema) and not overwrite:
         return json.loads(metadata_path.read_text(encoding="utf-8"))
     if (output.exists() or metadata_path.exists()) and not overwrite:
         raise FileExistsError(
@@ -88,14 +122,14 @@ def build_feature_cache(
         partial,
         mode="w+",
         dtype=np.float16,
-        shape=(len(dataset), ACTION_COUNT, MECHANICS_FEATURE_COUNT),
+        shape=(len(dataset), ACTION_COUNT, feature_count),
     )
     started = time.monotonic()
     try:
         for index in range(len(dataset)):
             row = dataset[index]
             state = state_with_row_context(row)
-            matrix[index] = np.asarray(candidate_feature_matrix(state), dtype=np.float16)
+            matrix[index] = np.asarray(feature_builder(state), dtype=np.float16)
             if progress_every and (index + 1) % progress_every == 0:
                 print(
                     json.dumps(
@@ -118,12 +152,12 @@ def build_feature_cache(
         raise
 
     metadata = {
-        "schema": MECHANICS_SCHEMA,
-        "feature_count": MECHANICS_FEATURE_COUNT,
-        "feature_names": list(MECHANICS_FEATURE_NAMES),
+        "schema": schema,
+        "feature_count": feature_count,
+        "feature_names": list(feature_names),
         "rows": len(dataset),
         "dtype": "float16",
-        "shape": [len(dataset), ACTION_COUNT, MECHANICS_FEATURE_COUNT],
+        "shape": [len(dataset), ACTION_COUNT, feature_count],
         "source": _source_signature(source, len(dataset)),
         "cache_file": str(output),
         "elapsed_seconds": round(time.monotonic() - started, 1),
@@ -147,6 +181,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--progress-every", type=int, default=10_000)
+    parser.add_argument(
+        "--schema",
+        choices=(LEGACY_MECHANICS_SCHEMA, DEFAULT_MECHANICS_SCHEMA),
+        default=DEFAULT_MECHANICS_SCHEMA,
+    )
     return parser
 
 
@@ -157,6 +196,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output,
         overwrite=args.overwrite,
         progress_every=args.progress_every,
+        schema=args.schema,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

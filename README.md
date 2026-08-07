@@ -26,29 +26,31 @@ the same 5,000 hash-sampled validation rows, and writes a comparison summary:
 
 ```bash
 .venv/bin/python -m pokemon_battler.experiment \
-  --output-dir outputs/mechanics-v1-1epoch
+  --output-dir outputs/mechanics-v2-1epoch
 ```
 
 The defaults are candidate-wise legal-action cross-entropy, a shared numeric
-mechanics scorer, a move-name-free state prompt, QLoRA, effective batch 32,
-SDPA, a cosine schedule with a 5% floor, and seed 42. The runner builds
-memory-mapped feature caches before training. No `--max-steps` is used, so the
-286,059-row training split allows about 8,940 optimizer updates. Early stopping
-ends the run after four 500-step validation checks without an accuracy gain of
-at least 0.002. Results are saved to:
+and categorical mechanics scorer, a compact state prompt, QLoRA, effective
+batch 32, SDPA, a cosine schedule with a 5% floor, and seed 42. Exact move and
+state identities use learned embeddings rather than arbitrary ordinal numbers.
+The runner builds memory-mapped numeric feature caches before training. No
+`--max-steps` is used, so the 286,059-row training split allows about 8,940
+optimizer updates. Early stopping ends the run after four 500-step validation
+checks without an accuracy gain of at least 0.002. Results are saved to:
 
 ```text
-outputs/mechanics-v1-1epoch/best/
-outputs/mechanics-v1-1epoch/final/
-outputs/mechanics-v1-1epoch/history.json
-outputs/mechanics-v1-1epoch/reports/best-validation.json
-outputs/mechanics-v1-1epoch/reports/final-validation.json
-outputs/mechanics-v1-1epoch/run_summary.json
+outputs/mechanics-v2-1epoch/best/
+outputs/mechanics-v2-1epoch/final/
+outputs/mechanics-v2-1epoch/history.json
+outputs/mechanics-v2-1epoch/reports/best-validation.json
+outputs/mechanics-v2-1epoch/reports/final-validation.json
+outputs/mechanics-v2-1epoch/run_summary.json
 ```
 
-The first cache build is CPU work and writes about 688 MiB for training and
-69 MiB for validation. Later runs reuse those files when the source JSONL and
-feature schema are unchanged.
+The first cache build is CPU work and writes about 1.43 GiB for training and
+147 MiB for validation. Later runs reuse those files when the source JSONL and
+feature schema are unchanged. `mechanics-v1` caches and checkpoints remain
+loadable, but they are not reused by a v2 run.
 
 This command requires CUDA for its default 4-bit configuration. After an
 editable reinstall, `pokemon-run --output-dir ...` is the equivalent entry
@@ -114,11 +116,15 @@ command in this guide includes both arguments and therefore performs QLoRA.
   tokenization bias
 - A shared candidate head that scores each legal action description with the
   same network and randomizes candidate order during training
-- A 97-value mechanics vector for every candidate, including type matchup,
-  estimated damage pressure, move effects, stat changes, and switch entry cost
-- A hybrid mechanics head that fuses those vectors with one Qwen state embedding
-  without turning the vectors or move names into prompt tokens
-- A mechanics-only MLP baseline using the identical vectors and legal mask
+- A 207-value mechanics vector for every candidate, including typed side
+  conditions, speed/order context, matchup, corrected damage pressure, move
+  effects, stat changes, and switch entry cost
+- Thirty-two categorical identity fields with shared learned embeddings for
+  moves, species, items, abilities, types, statuses, effects, field state, and
+  recent move history
+- A hybrid mechanics head that fuses the structured candidates with one Qwen
+  state embedding while keeping the prompt compact
+- A mechanics-only MLP baseline using the identical structured inputs and legal mask
 - Versioned, memory-mapped feature caches that are reused across runs
 - A compact prompt whose measured median is 1,157 tokens instead of 2,057
 - Validation action NLL, top-k accuracy, MRR, action-family metrics, entropy,
@@ -159,21 +165,30 @@ It uses the same legal mask, but makes the score depend directly on the candidat
 semantics instead of a permanently assigned A0-A12 output weight. Candidate
 order is randomized during training to reduce position shortcuts.
 
-The recommended `--objective mechanics-head` path removes move and candidate
-names from the prompt. It builds a 97-value vector for each A0-A12 candidate and
-feeds that tensor directly to a shared MLP. The vector contains action kind,
-type effectiveness, STAB, accuracy, PP, priority, approximate damage range,
-secondary effects, healing, recoil, stat changes, hazard interaction, switch HP,
-and matchup pressure. Qwen still encodes the strategic battle state once; the
-head scores each candidate by combining that state embedding with its vector.
+The recommended `--objective mechanics-head` path builds a 207-value vector and
+32 categorical identity fields for each A0-A12 candidate. The numeric branch
+contains action kind, type effectiveness, corrected Terastallization STAB,
+accuracy, PP, priority, approximate damage, speed/order context, typed side
+conditions, secondary effects, healing, recoil, stat changes, hazard
+interaction, switch HP, and matchup pressure. The categorical branch keeps
+Rest distinct from Sleep Talk, Reflect distinct from Light Screen, and other
+mechanically special actions distinct even when their coarse numeric summaries
+match. It also embeds species, items, abilities, statuses, active effects, and
+move history. These are categorical IDs, not continuous numbers.
+
+The v2 prompt retains compact move and Pokémon names because names provide a
+cheap residual signal for mechanics that cannot be safely compressed into one
+generic flag. It still omits verbose move-stat prose and legal-action
+descriptions. Qwen encodes the strategic battle state once; the head scores
+each candidate by combining that state embedding with its structured features.
 Illegal rows are masked before cross-entropy and argmax.
 
 This is not RAG and does not ask a 0.5B model to parse generated damage prose.
-Move names are used once by the deterministic feature builder to look up
-mechanics, then discarded from the model input. Damage values are reproducible
-estimates rather than exact simulator rolls because the replay rows do not carry
-EVs, IVs, natures, or every transient modifier. See
-[docs/mechanics-v1.md](docs/mechanics-v1.md) for the schema and limitations.
+Damage values are reproducible estimates rather than exact simulator rolls
+because the replay rows do not carry EVs, IVs, natures, or every transient
+modifier. See [docs/mechanics-v2.md](docs/mechanics-v2.md) for the schema,
+compatibility rules, and limitations. The original
+[mechanics-v1 design](docs/mechanics-v1.md) is retained for reproducibility.
 
 A direct training command equivalent to the training phase of `pokemon-run` is:
 
@@ -182,11 +197,11 @@ pokemon-train \
   --model Qwen/Qwen2.5-0.5B \
   --train-file data/gen9ou-dev/train.jsonl \
   --validation-file data/gen9ou-dev/validation.jsonl \
-  --output-dir outputs/mechanics-v1-1epoch \
+  --output-dir outputs/mechanics-v2-1epoch \
   --objective mechanics-head \
-  --prompt-format mechanics-v1 \
-  --train-mechanics-cache data/gen9ou-dev/train.mechanics-v1.npy \
-  --validation-mechanics-cache data/gen9ou-dev/validation.mechanics-v1.npy \
+  --prompt-format mechanics-v2 \
+  --train-mechanics-cache data/gen9ou-dev/train.mechanics-v2.npy \
+  --validation-mechanics-cache data/gen9ou-dev/validation.mechanics-v2.npy \
   --method lora \
   --local-files-only \
   --load-in-4bit \
@@ -275,7 +290,8 @@ model, uses the same legal mask, and tests whether the 0.5B causal model earns i
 additional cost.
 
 There is also a stricter mechanics-only ablation. It receives the exact same
-97-value candidate vectors as the hybrid model and no Qwen representation:
+numeric and categorical candidate inputs as the hybrid model and no Qwen
+representation:
 
 ```bash
 pokemon-mechanics-baseline train \
@@ -462,11 +478,12 @@ If real prompts exceed 4096, first make the serializer more compact and rerun
 the inspection. Increasing context beyond 4096 is the last option on an 8 GB
 GPU.
 
-`mechanics-v1` is shorter because candidate moves travel through the numeric
-branch, not the tokenizer. On a quick fixed check of the first 100 training
-rows, its median was 466 tokens versus 1,211 for `compact-v1`; its maximum was
-558 versus 1,414. Run `pokemon-inspect --prompt-format mechanics-v1` on a larger
-sample before changing the context ceiling.
+`mechanics-v2` keeps only compact move-name lists and history in text; all
+numeric move prose still travels through the structured branch. On the first
+100 training rows, its median was 592 tokens versus 463 for v1 and 1,207 for
+`compact-v1`; its maximum was 707 versus 1,415 for `compact-v1`. Run
+`pokemon-inspect --prompt-format mechanics-v2` before changing the context
+ceiling. The v1 serializer remains available for its original checkpoints.
 
 ## Legacy causal-LM experiment protocol
 

@@ -79,9 +79,9 @@ Implemented:
 - Legal-action validation and constrained inference.
 - Full SFT, fixed policy-head, shared candidate-head, mechanics-head, LoRA, and
   4-bit QLoRA support.
-- Compact, verbose, and move-name-free mechanics prompt serializers.
-- Versioned 97-value candidate mechanics vectors, memory-mapped caches, and a
-  mechanics-only MLP ablation.
+- Compact, verbose, legacy move-name-free, and mechanics-v2 prompt serializers.
+- Versioned 207-value candidate mechanics vectors, 32 categorical identity
+  fields, memory-mapped caches, and a mechanics-only MLP ablation.
 - A legally masked policy scorer that returns a score for every candidate.
 - Deterministic offline ranking, family, entropy, and action-agreement evaluation.
 - One-command cache preparation, plateau-aware training, best/final evaluation,
@@ -107,8 +107,8 @@ Deliverables:
 - Pass the 128-example memorization test.
 - Preserve the step-5,000 candidate-head checkpoint as a 36.52% validation
   reference, not as a completed epoch or live-play result.
-- Train the mechanics-conditioned checkpoint for up to one complete pass, with
-  validation plateau stopping.
+- Train the collision-resistant mechanics-v2 checkpoint for up to one complete
+  pass, with validation plateau stopping.
 - Compare the hybrid against the mechanics-only ablation to measure the value of
   Qwen's state representation.
 - Report held-out action agreement, action-type accuracy, replay-candidate

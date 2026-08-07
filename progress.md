@@ -27,8 +27,8 @@ The first training harness is ready:
 - Provides a one-command train/evaluate/report runner.
 - Reports reproducible static, frequency, ranking, and action-type baselines.
 - Includes a compact feature-hashed non-language-model policy baseline.
-- Includes a move-name-free hybrid policy with a versioned 97-value mechanics
-  tensor for each action.
+- Includes a hybrid policy with a versioned 207-value mechanics tensor and 32
+  learned categorical identity fields for each action.
 - Precomputes mechanics into memory-mapped float16 caches and provides a
   mechanics-only MLP ablation.
 - Stops one-command runs after four flat validation checks while preserving the
@@ -36,7 +36,7 @@ The first training harness is ready:
 
 Verified locally with:
 
-- 39 unit tests.
+- 46 unit tests.
 - One real Qwen2.5-0.5B LoRA optimization and adapter-save step.
 - Adapter reload and constrained action evaluation.
 - One real Qwen2.5-0.5B policy-head optimization, save, reload, and prediction.
@@ -45,6 +45,19 @@ Verified locally with:
 - Non-language-model train, save, reload, and batched evaluation smoke tests.
 - Mechanics feature, cache, hybrid-score, and mechanics-only backpropagation
   tests.
+- One real Qwen2.5-0.5B mechanics-v2 forward/backward pass with `[1, 13, 207]`
+  numeric features and `[1, 13, 32]` categorical identities.
+
+## Mechanics-v2 representation update
+
+The first mechanics design collapsed distinct legal actions into identical
+vectors in 2,880 of 286,059 training rows. The target itself was ambiguous in
+780 rows. The replacement keeps the numeric path but adds typed side
+conditions, speed/order context, corrected damage cases, candidate defensive
+matchups, and learned identities for moves, species, items, abilities, types,
+statuses, effects, field state, and history. Compact move names remain in the
+prompt as a residual signal for mechanics that should not be reduced to one
+generic flag. V1 checkpoints and caches are still loadable.
 
 ## Candidate-head reference result
 
@@ -60,7 +73,7 @@ Next experiment:
 
 ```bash
 .venv/bin/python -m pokemon_battler.experiment \
-  --output-dir outputs/mechanics-v1-1epoch
+  --output-dir outputs/mechanics-v2-1epoch
 ```
 
 This builds or reuses the mechanics caches, trains for at most one complete

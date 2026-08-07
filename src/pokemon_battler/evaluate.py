@@ -92,7 +92,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
 
     complete_dataset: Any = JsonlOffsetDataset(args.data_file)
     if mechanics_head is not None and args.mechanics_cache:
-        complete_dataset = MechanicsCacheDataset(complete_dataset, args.mechanics_cache)
+        complete_dataset = MechanicsCacheDataset(
+            complete_dataset,
+            args.mechanics_cache,
+            mechanics_schema=mechanics_head.schema,
+        )
     dataset, sample_metadata = select_evaluation_dataset(
         complete_dataset,
         max_examples=args.max_examples,
@@ -114,11 +118,16 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             collator_class = CandidateCollator
         else:
             collator_class = PolicyCollator
+        collator_kwargs: dict[str, Any] = {
+            "max_length": args.max_length,
+            "truncation": "error",
+            "prompt_format": prompt_format,
+        }
+        if mechanics_head is not None:
+            collator_kwargs["mechanics_schema"] = mechanics_head.schema
         collator = collator_class(
             tokenizer,
-            max_length=args.max_length,
-            truncation="error",
-            prompt_format=prompt_format,
+            **collator_kwargs,
         )
         evaluated = 0
         logits_parameter = indexed_logits_parameter(model)

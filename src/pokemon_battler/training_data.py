@@ -11,12 +11,28 @@ import torch
 from torch.utils.data import Dataset
 
 from pokemon_battler.actions import ACTION_COUNT, action_label, legal_action_ids
-from pokemon_battler.mechanics import (
-    MECHANICS_FEATURE_COUNT,
-    MECHANICS_SCHEMA,
-    candidate_feature_matrix,
-)
+from pokemon_battler.mechanics import MECHANICS_SCHEMA as LEGACY_MECHANICS_SCHEMA
+from pokemon_battler.mechanics_v2 import MECHANICS_SCHEMA as DEFAULT_MECHANICS_SCHEMA
 from pokemon_battler.prompting import encode_candidate_prompt, render_prompt
+
+
+def _mechanics_spec(schema: str) -> tuple[int, int, Any]:
+    if schema == LEGACY_MECHANICS_SCHEMA:
+        from pokemon_battler.mechanics import (
+            MECHANICS_FEATURE_COUNT,
+            candidate_feature_matrix,
+        )
+
+        return MECHANICS_FEATURE_COUNT, 0, candidate_feature_matrix
+    if schema == DEFAULT_MECHANICS_SCHEMA:
+        from pokemon_battler.mechanics_v2 import (
+            MECHANICS_FEATURE_COUNT,
+            MECHANICS_IDENTITY_COUNT,
+            candidate_feature_matrix,
+        )
+
+        return MECHANICS_FEATURE_COUNT, MECHANICS_IDENTITY_COUNT, candidate_feature_matrix
+    raise ValueError(f"Unsupported mechanics schema: {schema!r}")
 
 
 def state_with_row_context(row: dict[str, Any]) -> dict[str, Any]:
@@ -98,20 +114,29 @@ class JsonlOffsetDataset(Dataset[dict[str, Any]]):
 class MechanicsCacheDataset(Dataset[dict[str, Any]]):
     """Attach a memory-mapped mechanics matrix to rows without adding prompt tokens."""
 
-    def __init__(self, dataset: Dataset[dict[str, Any]], cache_path: str | Path) -> None:
+    def __init__(
+        self,
+        dataset: Dataset[dict[str, Any]],
+        cache_path: str | Path,
+        *,
+        mechanics_schema: str = DEFAULT_MECHANICS_SCHEMA,
+    ) -> None:
         self.dataset = dataset
         self.cache_path = Path(cache_path)
+        self.mechanics_schema = mechanics_schema
+        self.feature_count, _, _ = _mechanics_spec(mechanics_schema)
         self.metadata_path = self.cache_path.with_suffix(self.cache_path.suffix + ".json")
         if not self.cache_path.is_file() or not self.metadata_path.is_file():
             raise FileNotFoundError(
                 f"Mechanics cache or metadata is missing: {self.cache_path}"
             )
         metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-        if metadata.get("schema") != MECHANICS_SCHEMA:
+        if metadata.get("schema") != mechanics_schema:
             raise ValueError(
-                f"Mechanics cache uses {metadata.get('schema')!r}; expected {MECHANICS_SCHEMA!r}"
+                f"Mechanics cache uses {metadata.get('schema')!r}; "
+                f"expected {mechanics_schema!r}"
             )
-        if int(metadata.get("feature_count", -1)) != MECHANICS_FEATURE_COUNT:
+        if int(metadata.get("feature_count", -1)) != self.feature_count:
             raise ValueError("Mechanics cache feature count does not match this code")
         if int(metadata.get("rows", -1)) < len(dataset):
             raise ValueError("Mechanics cache has fewer rows than its JSONL dataset")
@@ -124,11 +149,11 @@ class MechanicsCacheDataset(Dataset[dict[str, Any]]):
     def _matrix(self) -> np.ndarray[Any, Any]:
         if self._features is None:
             matrix = np.load(self.cache_path, mmap_mode="r")
-            expected_tail = (ACTION_COUNT, MECHANICS_FEATURE_COUNT)
+            expected_tail = (ACTION_COUNT, self.feature_count)
             if matrix.ndim != 3 or tuple(matrix.shape[1:]) != expected_tail:
                 raise ValueError(
                     f"Invalid mechanics cache shape {matrix.shape}; expected [rows, 13, "
-                    f"{MECHANICS_FEATURE_COUNT}]"
+                    f"{self.feature_count}]"
                 )
             self._features = matrix
         return self._features
@@ -289,7 +314,7 @@ class PolicyCollator:
 
 
 class MechanicsCollator:
-    """Build move-name-free batches plus a zero-token candidate mechanics tensor."""
+    """Build compact state batches plus numeric and categorical candidate mechanics."""
 
     def __init__(
         self,
@@ -297,7 +322,8 @@ class MechanicsCollator:
         *,
         max_length: int = 4096,
         truncation: str = "error",
-        prompt_format: str = "mechanics-v1",
+        prompt_format: str = "mechanics-v2",
+        mechanics_schema: str = DEFAULT_MECHANICS_SCHEMA,
     ) -> None:
         if truncation not in {"error", "left"}:
             raise ValueError("truncation must be 'error' or 'left'")
@@ -305,6 +331,10 @@ class MechanicsCollator:
         self.max_length = max_length
         self.truncation = truncation
         self.prompt_format = prompt_format
+        self.mechanics_schema = mechanics_schema
+        self.feature_count, self.identity_count, self.feature_builder = _mechanics_spec(
+            mechanics_schema
+        )
         self.pad_token_id = tokenizer.pad_token_id
         if self.pad_token_id is None:
             self.pad_token_id = tokenizer.eos_token_id
@@ -314,7 +344,7 @@ class MechanicsCollator:
     def _encode(
         self,
         row: dict[str, Any],
-    ) -> tuple[list[int], int, list[bool], torch.Tensor]:
+    ) -> tuple[list[int], int, list[bool], torch.Tensor, torch.Tensor | None]:
         state = state_with_row_context(row)
         action_id = int(row["action_id"])
         legal = legal_action_ids(state)
@@ -337,38 +367,57 @@ class MechanicsCollator:
             prompt_ids = prompt_ids[-self.max_length :]
         raw_features = row.get("_mechanics_features")
         if raw_features is None:
-            raw_features = candidate_feature_matrix(state)
+            raw_features = self.feature_builder(state)
         feature_tensor = torch.as_tensor(raw_features, dtype=torch.float32)
-        if tuple(feature_tensor.shape) != (ACTION_COUNT, MECHANICS_FEATURE_COUNT):
+        if tuple(feature_tensor.shape) != (ACTION_COUNT, self.feature_count):
             raise ValueError(
                 f"Mechanics features have shape {tuple(feature_tensor.shape)}; expected "
-                f"({ACTION_COUNT}, {MECHANICS_FEATURE_COUNT})"
+                f"({ACTION_COUNT}, {self.feature_count})"
             )
+        identity_tensor: torch.Tensor | None = None
+        if self.mechanics_schema == DEFAULT_MECHANICS_SCHEMA:
+            from pokemon_battler.mechanics_v2 import candidate_identity_matrix
+
+            identity_tensor = torch.tensor(
+                candidate_identity_matrix(state),
+                dtype=torch.long,
+            )
+            if tuple(identity_tensor.shape) != (ACTION_COUNT, self.identity_count):
+                raise ValueError(
+                    f"Mechanics identities have shape {tuple(identity_tensor.shape)}; "
+                    f"expected ({ACTION_COUNT}, {self.identity_count})"
+                )
         legal_mask = [candidate in legal for candidate in range(ACTION_COUNT)]
-        return prompt_ids, action_id, legal_mask, feature_tensor
+        return prompt_ids, action_id, legal_mask, feature_tensor, identity_tensor
 
     def __call__(self, rows: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
         encoded = [self._encode(row) for row in rows]
-        max_batch_length = max(len(prompt_ids) for prompt_ids, _, _, _ in encoded)
+        max_batch_length = max(len(prompt_ids) for prompt_ids, _, _, _, _ in encoded)
         input_rows: list[list[int]] = []
         attention_rows: list[list[int]] = []
         action_ids: list[int] = []
         legal_masks: list[list[bool]] = []
         feature_rows: list[torch.Tensor] = []
-        for prompt_ids, action_id, legal_mask, features in encoded:
+        identity_rows: list[torch.Tensor] = []
+        for prompt_ids, action_id, legal_mask, features, identities in encoded:
             padding = max_batch_length - len(prompt_ids)
             input_rows.append(prompt_ids + [self.pad_token_id] * padding)
             attention_rows.append([1] * len(prompt_ids) + [0] * padding)
             action_ids.append(action_id)
             legal_masks.append(legal_mask)
             feature_rows.append(features)
-        return {
+            if identities is not None:
+                identity_rows.append(identities)
+        batch = {
             "input_ids": torch.tensor(input_rows, dtype=torch.long),
             "attention_mask": torch.tensor(attention_rows, dtype=torch.long),
             "action_ids": torch.tensor(action_ids, dtype=torch.long),
             "legal_action_mask": torch.tensor(legal_masks, dtype=torch.bool),
             "mechanics_features": torch.stack(feature_rows),
         }
+        if identity_rows:
+            batch["mechanics_identity_ids"] = torch.stack(identity_rows)
+        return batch
 
 
 class CandidateCollator:

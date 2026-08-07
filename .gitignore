@@ -7,9 +7,9 @@ data/
 outputs/
 reports/
 
-*.mechanics-v1.npy
-*.mechanics-v1.npy.json
-*.mechanics-v1.npy.partial
+*.mechanics-v*.npy
+*.mechanics-v*.npy.json
+*.mechanics-v*.npy.partial
 
 *.safetensors
 *.bin

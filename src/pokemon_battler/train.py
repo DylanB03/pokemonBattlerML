@@ -38,7 +38,14 @@ from pokemon_battler.modeling import (
     save_mechanics_head,
     save_policy_head,
 )
-from pokemon_battler.mechanics import MECHANICS_FEATURE_COUNT, MECHANICS_SCHEMA
+from pokemon_battler.mechanics_v2 import (
+    MECHANICS_FEATURE_COUNT,
+    MECHANICS_FEATURE_NAMES,
+    MECHANICS_IDENTITY_COUNT,
+    MECHANICS_IDENTITY_NAMES,
+    MECHANICS_IDENTITY_VOCAB_SIZES,
+    MECHANICS_SCHEMA,
+)
 from pokemon_battler.prompting import PROMPT_FORMATS
 from pokemon_battler.training_data import (
     CandidateCollator,
@@ -395,7 +402,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("early_stopping_patience cannot be negative")
     if args.early_stopping_min_delta < 0:
         raise ValueError("early_stopping_min_delta cannot be negative")
-    if args.objective == "candidate-head" and args.prompt_format == "mechanics-v1":
+    if args.objective == "candidate-head" and args.prompt_format.startswith("mechanics-"):
         raise ValueError("candidate-head requires prompt candidate lines; use compact-v1")
     if args.objective in ACTION_OBJECTIVES and args.loss_projection == "full":
         raise ValueError(
@@ -405,6 +412,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if args.objective == "mechanics-head":
         args.mechanics_schema = MECHANICS_SCHEMA
         args.mechanics_feature_count = MECHANICS_FEATURE_COUNT
+        args.mechanics_feature_names = list(MECHANICS_FEATURE_NAMES)
+        args.mechanics_identity_count = MECHANICS_IDENTITY_COUNT
+        args.mechanics_identity_names = list(MECHANICS_IDENTITY_NAMES)
+        args.mechanics_identity_vocab_sizes = dict(MECHANICS_IDENTITY_VOCAB_SIZES)
 
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
@@ -457,7 +468,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     elif args.objective == "candidate-head":
         action_head = create_candidate_head(model, device)
     elif args.objective == "mechanics-head":
-        action_head = create_mechanics_head(model, device)
+        action_head = create_mechanics_head(model, device, schema=MECHANICS_SCHEMA)
     else:
         action_head = None
     print(
@@ -487,7 +498,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     dataset_limit = args.overfit_examples
     train_dataset: Any = JsonlOffsetDataset(args.train_file, limit=dataset_limit)
     if args.objective == "mechanics-head" and args.train_mechanics_cache:
-        train_dataset = MechanicsCacheDataset(train_dataset, args.train_mechanics_cache)
+        train_dataset = MechanicsCacheDataset(
+            train_dataset,
+            args.train_mechanics_cache,
+            mechanics_schema=MECHANICS_SCHEMA,
+        )
     class_weights, serialized_class_weights = _training_class_weights(
         args.train_file,
         args.class_weighting,
@@ -510,6 +525,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             complete_validation_dataset = MechanicsCacheDataset(
                 complete_validation_dataset,
                 args.validation_mechanics_cache,
+                mechanics_schema=MECHANICS_SCHEMA,
             )
         validation_dataset, validation_sample_metadata = select_evaluation_dataset(
             complete_validation_dataset,
@@ -532,6 +548,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.objective == "candidate-head":
         collator_kwargs["shuffle_candidates"] = True
+    elif args.objective == "mechanics-head":
+        collator_kwargs["mechanics_schema"] = MECHANICS_SCHEMA
     train_collator = collator_classes[args.objective](
         tokenizer,
         **collator_kwargs,
@@ -1010,15 +1028,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt-format",
         choices=PROMPT_FORMATS,
-        default="mechanics-v1",
+        default="mechanics-v2",
     )
     parser.add_argument(
         "--train-mechanics-cache",
-        help="Optional mechanics-v1 .npy cache aligned with the training JSONL.",
+        help="Optional mechanics-v2 .npy cache aligned with the training JSONL.",
     )
     parser.add_argument(
         "--validation-mechanics-cache",
-        help="Optional mechanics-v1 .npy cache aligned with the validation JSONL.",
+        help="Optional mechanics-v2 .npy cache aligned with the validation JSONL.",
     )
     parser.add_argument("--num-workers", type=int, default=0)
 

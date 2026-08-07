@@ -15,11 +15,15 @@ from torch.utils.data import DataLoader, Dataset
 
 from pokemon_battler.actions import ACTION_COUNT, legal_action_ids
 from pokemon_battler.evaluation_utils import ActionMetrics, select_evaluation_dataset
-from pokemon_battler.mechanics import (
+from pokemon_battler.mechanics_v2 import (
     MECHANICS_FEATURE_COUNT,
     MECHANICS_FEATURE_NAMES,
+    MECHANICS_IDENTITY_FIELDS,
+    MECHANICS_IDENTITY_NAMES,
+    MECHANICS_IDENTITY_VOCAB_SIZES,
     MECHANICS_SCHEMA,
     candidate_feature_matrix,
+    candidate_identity_matrix,
 )
 from pokemon_battler.mechanics_cache import build_feature_cache, default_cache_path
 from pokemon_battler.training_data import (
@@ -38,23 +42,53 @@ class MechanicsOnlyPolicy(torch.nn.Module):
     def __init__(self, hidden_size: int = 128) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        self.identity_embedding_size = max(min(hidden_size // 8, 16), 8)
+        namespaces = {namespace for _, namespace in MECHANICS_IDENTITY_FIELDS}
+        self.identity_embeddings = torch.nn.ModuleDict(
+            {
+                f"namespace_{namespace}": torch.nn.Embedding(
+                    MECHANICS_IDENTITY_VOCAB_SIZES[namespace],
+                    self.identity_embedding_size,
+                    padding_idx=0,
+                )
+                for namespace in sorted(namespaces)
+            }
+        )
+        scorer_input_size = MECHANICS_FEATURE_COUNT + (
+            len(MECHANICS_IDENTITY_FIELDS) * self.identity_embedding_size
+        )
         self.scorer = torch.nn.Sequential(
-            torch.nn.Linear(MECHANICS_FEATURE_COUNT, hidden_size),
+            torch.nn.Linear(scorer_input_size, hidden_size),
             torch.nn.GELU(),
             torch.nn.LayerNorm(hidden_size),
             torch.nn.Linear(hidden_size, hidden_size),
             torch.nn.GELU(),
             torch.nn.Linear(hidden_size, 1),
         )
+        for embedding in self.identity_embeddings.values():
+            torch.nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+            torch.nn.init.zeros_(embedding.weight[0])
 
     def forward(self, batch: dict[str, Any]) -> torch.Tensor:
-        logits = self.scorer(batch["mechanics_features"].float()).squeeze(-1)
+        identity_ids = batch["mechanics_identity_ids"]
+        identities = [
+            self.identity_embeddings[f"namespace_{namespace}"](
+                identity_ids[:, :, index]
+            )
+            for index, (_, namespace) in enumerate(MECHANICS_IDENTITY_FIELDS)
+        ]
+        inputs = torch.cat(
+            (batch["mechanics_features"].float(), *identities),
+            dim=-1,
+        )
+        logits = self.scorer(inputs).squeeze(-1)
         return logits.masked_fill(~batch["legal_action_mask"], float("-inf"))
 
 
 class MechanicsOnlyCollator:
     def __call__(self, rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         features: list[torch.Tensor] = []
+        identities: list[torch.Tensor] = []
         legal_masks: list[list[bool]] = []
         targets: list[int] = []
         for row in rows:
@@ -70,10 +104,14 @@ class MechanicsOnlyCollator:
             if tuple(feature_tensor.shape) != (ACTION_COUNT, MECHANICS_FEATURE_COUNT):
                 raise ValueError("Invalid candidate mechanics matrix")
             features.append(feature_tensor)
+            identities.append(
+                torch.tensor(candidate_identity_matrix(state), dtype=torch.long)
+            )
             legal_masks.append([action_id in legal for action_id in range(ACTION_COUNT)])
             targets.append(target)
         return {
             "mechanics_features": torch.stack(features),
+            "mechanics_identity_ids": torch.stack(identities),
             "legal_action_mask": torch.tensor(legal_masks, dtype=torch.bool),
             "action_ids": torch.tensor(targets, dtype=torch.long),
             "rows": list(rows),
@@ -136,9 +174,13 @@ def _load(path: str | Path, device: torch.device) -> tuple[MechanicsOnlyPolicy, 
 
 
 def _cached_dataset(data_file: str, cache_file: str | None, rebuild: bool) -> Dataset:
-    path = Path(cache_file) if cache_file else default_cache_path(data_file)
-    build_feature_cache(data_file, path, overwrite=rebuild)
-    return MechanicsCacheDataset(JsonlOffsetDataset(data_file), path)
+    path = Path(cache_file) if cache_file else default_cache_path(data_file, MECHANICS_SCHEMA)
+    build_feature_cache(data_file, path, schema=MECHANICS_SCHEMA, overwrite=rebuild)
+    return MechanicsCacheDataset(
+        JsonlOffsetDataset(data_file),
+        path,
+        mechanics_schema=MECHANICS_SCHEMA,
+    )
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -247,6 +289,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                             "best_validation_loss": best_loss,
                             "mechanics_schema": MECHANICS_SCHEMA,
                             "feature_names": list(MECHANICS_FEATURE_NAMES),
+                            "identity_names": list(MECHANICS_IDENTITY_NAMES),
+                            "identity_vocab_sizes": dict(
+                                MECHANICS_IDENTITY_VOCAB_SIZES
+                            ),
                             "train_sample": train_sample,
                             "validation_sample": validation_sample,
                         },
@@ -261,6 +307,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "best_validation_loss": best_loss if math.isfinite(best_loss) else None,
         "mechanics_schema": MECHANICS_SCHEMA,
         "feature_names": list(MECHANICS_FEATURE_NAMES),
+        "identity_names": list(MECHANICS_IDENTITY_NAMES),
+        "identity_vocab_sizes": dict(MECHANICS_IDENTITY_VOCAB_SIZES),
         "train_sample": train_sample,
         "validation_sample": validation_sample,
         "elapsed_seconds": round(time.monotonic() - started, 1),

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import torch
 
 from pokemon_battler.modeling import (
+    MechanicsHead,
     assistant_only_loss,
     indexed_logits_parameter,
     masked_candidate_logits,
@@ -14,6 +15,11 @@ from pokemon_battler.modeling import (
     masked_policy_logits,
     policy_head_loss,
     score_legal_actions,
+)
+from pokemon_battler.mechanics import MECHANICS_FEATURE_COUNT as V1_FEATURE_COUNT
+from pokemon_battler.mechanics_v2 import (
+    MECHANICS_FEATURE_COUNT as V2_FEATURE_COUNT,
+    MECHANICS_IDENTITY_COUNT,
 )
 from tests.helpers import state
 
@@ -220,6 +226,23 @@ class ModelingTests(unittest.TestCase):
         )
         self.assertEqual(int(logits.argmax(dim=1).item()), 1)
         self.assertTrue(torch.isneginf(logits[0, 5]))
+
+    def test_mechanics_head_preserves_v1_and_accepts_v2_identities(self) -> None:
+        v1 = MechanicsHead(16, schema="mechanics-v1")
+        v2 = MechanicsHead(16, schema="mechanics-v2")
+        state_hidden = torch.zeros((2, 16))
+
+        v1_logits = v1(state_hidden, torch.zeros((2, 13, V1_FEATURE_COUNT)))
+        v2_logits = v2(
+            state_hidden,
+            torch.zeros((2, 13, V2_FEATURE_COUNT)),
+            torch.zeros((2, 13, MECHANICS_IDENTITY_COUNT), dtype=torch.long),
+        )
+
+        self.assertEqual(v1_logits.shape, (2, 13))
+        self.assertEqual(v2_logits.shape, (2, 13))
+        self.assertFalse(any(key.startswith("identity_embeddings") for key in v1.state_dict()))
+        self.assertTrue(any(key.startswith("identity_embeddings") for key in v2.state_dict()))
 
 
 if __name__ == "__main__":
