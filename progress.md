@@ -102,3 +102,18 @@ must use a regenerated dataset in a new directory.
 
 The detailed interpretation and prioritized performance plan are in
 [docs/mechanics-v2-results-and-next-steps.md](docs/mechanics-v2-results-and-next-steps.md).
+
+## Interaction-policy design schema
+
+The raw replay archive was checked directly. A replay contains ordered `states`
+and `actions` arrays, and each state records the immediately preceding player
+and opponent move. Prepared training remains one row per decision, but a new
+preparer can derive history events and stable revealed rosters by walking only
+states at or before that decision. The legacy prepared JSONL discarded the
+accumulated context; the source archive did not.
+
+The proposed schema is documented in
+[docs/interaction-policy-v3.md](docs/interaction-policy-v3.md). It fixes the
+prepared-row version, cache arrays, 30-token structured layout, four-layer
+interaction encoder, legal hierarchy, optional value loss, Qwen ablations, and
+acceptance tests before implementation begins.

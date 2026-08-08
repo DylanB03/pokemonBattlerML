@@ -32,6 +32,9 @@ experiment is to regenerate those rows into a new directory, repeat the v2
 memorization gate, and train once on the corrected data. The full result,
 capacity analysis, and prioritized architecture plan are in
 [What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
+The proposed tensor shapes, token layout, history rules, hierarchical loss, and
+value-head boundary are specified in
+[Proposed interaction policy v3](docs/interaction-policy-v3.md).
 
 ## Reproduce the completed experiment
 

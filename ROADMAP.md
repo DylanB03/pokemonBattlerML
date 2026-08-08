@@ -134,6 +134,8 @@ Exit criteria:
 
 The rationale and recommended experiment order are documented in
 [What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
+The proposed implementation contract is
+[Proposed interaction policy v3](docs/interaction-policy-v3.md).
 
 ## Phase 1 — Expose model-preference percentages
 
