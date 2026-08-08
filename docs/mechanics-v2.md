@@ -1,5 +1,13 @@
 # Mechanics-conditioned policy (`mechanics-v2`)
 
+The first completed v2 run reached 42.86% exact action agreement on 5,000
+validation rows. On the fixed 1,024-row training-validation check, it reached
+41.89% compared with the earlier candidate-head reference of 36.52%. The run
+also exposed an outdated prepared dataset and limits in the independent
+candidate scorer. See
+[What mechanics-v2 proved, and what should change next](mechanics-v2-results-and-next-steps.md)
+before starting another full run.
+
 ## Why v1 was replaced
 
 `mechanics-v1` proved that deterministic battle facts can bypass the tokenizer,

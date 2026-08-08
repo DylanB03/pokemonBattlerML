@@ -99,7 +99,8 @@ Not yet implemented:
 
 ## Phase 0 — Validate the behavior-cloned policy
 
-Status: in progress.
+Status: in progress. The first mechanics-v2 run is complete; live battle
+evaluation and the next policy architecture are not.
 
 Deliverables:
 
@@ -107,10 +108,18 @@ Deliverables:
 - Pass the 128-example memorization test.
 - Preserve the step-5,000 candidate-head checkpoint as a 36.52% validation
   reference, not as a completed epoch or live-play result.
-- Train the collision-resistant mechanics-v2 checkpoint for up to one complete
-  pass, with validation plateau stopping.
+- Preserve the completed mechanics-v2 checkpoint: 42.86% exact action agreement,
+  64.78% top-2, and 78.78% top-3 on 5,000 validation rows.
+- Regenerate the development split with preparation schema 2. The dataset used
+  by the completed run lacks recent history, accumulated opponent reveals, and
+  legal-mask-quality metadata now supported by the preparer.
+- Repeat the 128-row memorization gate for the final mechanics-v2 representation.
 - Compare the hybrid against the mechanics-only ablation to measure the value of
   Qwen's state representation.
+- Replace independent per-candidate MLP scoring with a small team/candidate
+  interaction encoder and an auxiliary hierarchical action-family objective.
+- Add a state-value objective before attempting outcome-weighted imitation or
+  offline reinforcement learning.
 - Report held-out action agreement, action-type accuracy, replay-candidate
   constraint coverage, and top-action margins. Measure true legality only under
   the live simulator mask.
@@ -122,6 +131,9 @@ Exit criteria:
   action agreement.
 - It always selects a legal action.
 - Battle evaluation is reproducible and reported with confidence intervals.
+
+The rationale and recommended experiment order are documented in
+[What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
 
 ## Phase 1 — Expose model-preference percentages
 

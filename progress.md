@@ -79,3 +79,26 @@ Next experiment:
 This builds or reuses the mechanics caches, trains for at most one complete
 pass, stops a validation plateau automatically, and compares the best and final
 checkpoints on the same validation rows.
+
+## Mechanics-v2 completed result
+
+The run stopped at step 8,000 after 20 hours 48 minutes. The selected final
+checkpoint reached 42.86% exact action agreement on 5,000 validation rows,
+64.78% top-2, 78.78% top-3, 0.6265 mean reciprocal rank, and 1.5452 candidate
+NLL. On the same fixed 1,024-row validation subset used by the earlier
+candidate-head run, the best mechanics-v2 checkpoint reached 41.8945% instead
+of 36.5234%, a gain of 5.37 percentage points with the same 0.5B base model.
+
+The result is uneven by action family: 50.78% ordinary-move accuracy, 31.16%
+switch accuracy, and 3.57% Tera-move accuracy. The model predicted Tera only
+five times for 112 Tera targets, although four of those five predictions were
+correct.
+
+A later audit found that the current `data/gen9ou-dev` split is entirely from
+the legacy preparation schema. None of its train, validation, or test rows
+contains recent move history, accumulated opponent reveals, or legal-mask
+quality. The current preparer already writes those fields, so the next long run
+must use a regenerated dataset in a new directory.
+
+The detailed interpretation and prioritized performance plan are in
+[docs/mechanics-v2-results-and-next-steps.md](docs/mechanics-v2-results-and-next-steps.md).

@@ -18,7 +18,22 @@ analysis, regret estimation, and grounded coaching.
 For the development story behind the current objective and experiment design,
 read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
 
-## Run the recommended experiment
+## Mechanics-v2 result and next experiment
+
+The completed mechanics-v2 run selected `final/` at 42.86% exact agreement on
+5,000 validation rows, with 64.78% top-2 and 78.78% top-3 agreement. On the
+fixed 1,024-row training-validation sample, its best checkpoint reached 41.89%,
+up from the candidate-head reference of 36.52% with the same 0.5B base model.
+
+Do not immediately repeat the same 20-hour run. The existing `data/gen9ou-dev`
+files were prepared before the current schema and lack multi-turn move history,
+accumulated opponent reveals, and legal-mask provenance. The next controlled
+experiment is to regenerate those rows into a new directory, repeat the v2
+memorization gate, and train once on the corrected data. The full result,
+capacity analysis, and prioritized architecture plan are in
+[What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
+
+## Reproduce the completed experiment
 
 With the existing `data/gen9ou-dev` split and cached Qwen checkpoint, this one
 command trains for up to one complete dataset pass, evaluates `best/` and `final/` on

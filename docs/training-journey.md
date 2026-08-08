@@ -406,3 +406,55 @@ If the mechanics-conditioned checkpoint improves on the 36.52% reference, I
 will compare it with the mechanics-only ablation and take the selected policy
 into reproducible Showdown battles against fixed opponents. Replay agreement is
 a useful gate. Real games remain the test that matters.
+
+## The run improved, but it exposed the next ceiling
+
+The mechanics-v2 run ended at step 8,000 after 20 hours and 48 minutes. Its
+selected final checkpoint got 2,143 of 5,000 validation decisions exactly
+right: 42.86%. Top-2 was 64.78% and top-3 was 78.78%. On the fixed 1,024 rows I
+had used to judge the earlier run, the best checkpoint went from 36.52% to
+41.89%. I did not change the 0.5B base model to get that gain. I changed what
+the policy could see about each action.
+
+That answered one question and left a harder one. A 0.5B model may simply be
+too small for some of the strategy I want. I cannot honestly conclude that
+from this run, though. The same model had just gained more than five points
+from a representation change, and the remaining failures were not evenly
+distributed. It got 50.78% of ordinary moves, 31.16% of switches, and only
+3.57% of Tera moves. It predicted Tera five times in 5,000 decisions despite
+112 Tera targets. Four of those five predictions were right. The model had
+learned to avoid the rare family, not merely to choose randomly inside it.
+
+I also found that I had trained on older prepared rows. Every row in the train,
+validation, and test files predates the current preparation schema. The loader
+could reconstruct turn number and remaining Pokémon, but it could not recreate
+four turns of move history, accumulated information about revealed opponents,
+or the quality of the legal-action mask from one isolated row. The code to
+write those fields already exists. I had not regenerated the dataset after
+adding it.
+
+The current scorer is another limit. It gives Qwen the compact text, takes one
+final state vector, repeats that vector for all 13 candidates, and scores each
+candidate independently with an MLP. The candidates meet only in the final
+softmax. The mechanics values also arrive after Qwen has finished encoding the
+state. That is efficient, but it is a weak way to represent the relationship
+between a full team, an opponent, and several mutually exclusive decisions.
+
+My next architecture will treat Pokémon and legal actions as a small set of
+interacting tokens. A lightweight attention block can compare candidates and
+team members directly, while the current Qwen vector remains one optional
+global input. I also want a hierarchical move/switch/Tera objective and a value
+head trained on battle outcome. Exact human-action cloning is a useful first
+gate, but it cannot tell the difference between copying a losing choice and
+choosing an alternative that wins.
+
+I am still not treating a model upgrade as the default answer. First I will
+regenerate the dataset, prove that the exact v2 stack can memorize 128 rows,
+and compare the structured interaction policy with and without Qwen. If the
+small model still helps and both versions plateau after the data and objective
+are fixed, then model capacity becomes a much stronger explanation. Until
+then, buying more parameters would hide the diagnosis.
+
+The concrete experiment order and the comparison with published Pokémon agents
+are in
+[What mechanics-v2 proved, and what should change next](mechanics-v2-results-and-next-steps.md).
