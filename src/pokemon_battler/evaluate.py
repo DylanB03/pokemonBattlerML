@@ -15,10 +15,13 @@ from pokemon_battler.evaluation_utils import (
 from pokemon_battler.modeling import (
     has_candidate_head,
     has_mechanics_head,
+    has_interaction_head,
     has_policy_head,
     indexed_logits_parameter,
+    interaction_outputs,
     load_candidate_head,
     load_mechanics_head,
+    load_interaction_head,
     load_policy_head,
     load_policy_model,
     load_training_metadata,
@@ -27,12 +30,14 @@ from pokemon_battler.modeling import (
     masked_policy_logits,
     score_legal_actions,
 )
+from pokemon_battler.interaction_cache import InteractionCacheDataset
 from pokemon_battler.prompting import PROMPT_FORMATS
 from pokemon_battler.training_data import (
     CandidateCollator,
     JsonlOffsetDataset,
     MechanicsCacheDataset,
     MechanicsCollator,
+    InteractionCollator,
     PolicyCollator,
     state_with_row_context,
 )
@@ -45,9 +50,18 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     prompt_format = args.prompt_format
     if prompt_format == "auto":
         prompt_format = str(training_metadata.get("prompt_format", "verbose-v1"))
+    model_adapter = args.adapter
+    if (
+        has_interaction_head(args.adapter)
+        and args.adapter
+        and not (Path(args.adapter) / "adapter_config.json").is_file()
+    ):
+        # Frozen/none interaction runs only train and save the structured head;
+        # the unchanged base model remains the configured --model.
+        model_adapter = None
     model, tokenizer, device = load_policy_model(
         args.model,
-        adapter_path=args.adapter,
+        adapter_path=model_adapter,
         dtype=args.dtype,
         load_in_4bit=args.load_in_4bit,
         local_files_only=args.local_files_only,
@@ -56,7 +70,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     model.eval()
     scoring = args.scoring
     if scoring == "auto":
-        if has_mechanics_head(args.adapter):
+        if has_interaction_head(args.adapter):
+            scoring = "interaction-head"
+        elif has_mechanics_head(args.adapter):
             scoring = "mechanics-head"
         elif has_candidate_head(args.adapter):
             scoring = "candidate-head"
@@ -71,6 +87,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         policy_head.eval()
         candidate_head = None
         mechanics_head = None
+        interaction_head = None
     elif scoring == "candidate-head":
         if not args.adapter:
             raise ValueError("Candidate-head scoring requires --adapter")
@@ -78,6 +95,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         candidate_head.eval()
         policy_head = None
         mechanics_head = None
+        interaction_head = None
     elif scoring == "mechanics-head":
         if not args.adapter:
             raise ValueError("Mechanics-head scoring requires --adapter")
@@ -85,10 +103,20 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         mechanics_head.eval()
         policy_head = None
         candidate_head = None
+        interaction_head = None
+    elif scoring == "interaction-head":
+        if not args.adapter:
+            raise ValueError("Interaction-head scoring requires --adapter")
+        interaction_head = load_interaction_head(model, args.adapter, device)
+        interaction_head.eval()
+        policy_head = None
+        candidate_head = None
+        mechanics_head = None
     else:
         policy_head = None
         candidate_head = None
         mechanics_head = None
+        interaction_head = None
 
     complete_dataset: Any = JsonlOffsetDataset(args.data_file)
     if mechanics_head is not None and args.mechanics_cache:
@@ -96,6 +124,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             complete_dataset,
             args.mechanics_cache,
             mechanics_schema=mechanics_head.schema,
+        )
+    if interaction_head is not None:
+        if not args.interaction_cache:
+            raise ValueError("Interaction-head evaluation requires --interaction-cache")
+        complete_dataset = InteractionCacheDataset(
+            complete_dataset,
+            args.interaction_cache,
         )
     dataset, sample_metadata = select_evaluation_dataset(
         complete_dataset,
@@ -110,9 +145,18 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         train_action_counts=train_counts,
         max_saved_errors=args.max_saved_errors,
     )
+    value_log_loss_sum = 0.0
+    value_brier_sum = 0.0
+    value_correct = 0
+    value_examples = 0
 
-    if candidate_head is not None or policy_head is not None or mechanics_head is not None:
-        if mechanics_head is not None:
+    if any(
+        head is not None
+        for head in (candidate_head, policy_head, mechanics_head, interaction_head)
+    ):
+        if interaction_head is not None:
+            collator_class = InteractionCollator
+        elif mechanics_head is not None:
             collator_class = MechanicsCollator
         elif candidate_head is not None:
             collator_class = CandidateCollator
@@ -139,7 +183,35 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     key: value.to(device)
                     for key, value in collator(rows).items()
                 }
-                if candidate_head is not None:
+                if interaction_head is not None:
+                    outputs = interaction_outputs(
+                        model,
+                        interaction_head,
+                        batch,
+                        logits_parameter=logits_parameter,
+                    )
+                    logits = outputs["action_log_probs"]
+                    value_targets = batch["value_targets"]
+                    value_mask = value_targets >= 0
+                    if bool(value_mask.any()):
+                        value_logits = outputs["value_logits"][value_mask].float()
+                        targets = value_targets[value_mask].float()
+                        probabilities = torch.sigmoid(value_logits)
+                        value_log_loss_sum += float(
+                            torch.nn.functional.binary_cross_entropy_with_logits(
+                                value_logits,
+                                targets,
+                                reduction="sum",
+                            ).item()
+                        )
+                        value_brier_sum += float(
+                            ((probabilities - targets) ** 2).sum().item()
+                        )
+                        value_correct += int(
+                            ((probabilities >= 0.5) == targets.bool()).sum().item()
+                        )
+                        value_examples += int(targets.numel())
+                elif candidate_head is not None:
                     logits = masked_candidate_logits(
                         model,
                         candidate_head,
@@ -204,6 +276,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 )
 
     report = metrics.report()
+    if value_examples:
+        report["value"] = {
+            "examples": value_examples,
+            "log_loss": value_log_loss_sum / value_examples,
+            "brier_score": value_brier_sum / value_examples,
+            "accuracy_at_0_5": value_correct / value_examples,
+        }
     report["evaluation"] = {
         "model": args.model,
         "adapter": args.adapter,
@@ -211,6 +290,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "data_file": args.data_file,
         "baseline_train_file": args.baseline_train_file,
         "mechanics_cache": args.mechanics_cache,
+        "interaction_cache": args.interaction_cache,
         "max_length": args.max_length,
         "batch_size": args.batch_size,
         "prompt_format": prompt_format,
@@ -256,7 +336,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scoring",
-        choices=("auto", "generative", "policy-head", "candidate-head", "mechanics-head"),
+        choices=(
+            "auto",
+            "generative",
+            "policy-head",
+            "candidate-head",
+            "mechanics-head",
+            "interaction-head",
+        ),
         default="auto",
         help="Auto-detect a saved action head or use generative candidate scoring.",
     )
@@ -271,6 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--output")
     parser.add_argument("--mechanics-cache")
+    parser.add_argument("--interaction-cache")
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument(

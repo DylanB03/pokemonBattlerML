@@ -18,23 +18,64 @@ analysis, regret estimation, and grounded coaching.
 For the development story behind the current objective and experiment design,
 read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
 
-## Mechanics-v2 result and next experiment
+## Run the new interaction policy end to end
+
+From the repository root, this is the complete command:
+
+```bash
+.venv/bin/python -m pokemon_battler.interaction_experiment
+```
+
+It performs the entire experiment in order:
+
+1. scans `data/raw/metamon/gen9ou.tar.gz` and prepares a deterministic 2%
+   schema-3 train/validation/test split;
+2. builds strict memory-mapped interaction caches for train and validation;
+3. trains on 128 rows and requires at least 95% training accuracy as a wiring
+   gate;
+4. trains the full hierarchical interaction policy for up to one epoch;
+5. evaluates `best/` and `final/` on the same deterministic validation sample;
+6. writes a combined summary without opening the test split.
+
+The first run must scan the roughly 20.4 GB compressed archive, so preparation
+and cache construction happen before GPU training begins. Matching prepared
+data and caches are reused on later experiments. The default expects the Qwen
+checkpoint to be cached locally and an NVIDIA GPU capable of 4-bit QLoRA; add
+`--allow-download` only if the checkpoint is not already local.
+
+Artifacts are kept separately:
+
+```text
+data/gen9ou-interaction-v1/
+outputs/interaction-v1-1epoch/overfit-128/
+outputs/interaction-v1-1epoch/policy/best/
+outputs/interaction-v1-1epoch/policy/final/
+outputs/interaction-v1-1epoch/policy/run_summary.json
+outputs/interaction-v1-1epoch/end_to_end_summary.json
+```
+
+The runner refuses a nonempty output directory, which prevents an older
+post-trained model from being overwritten. Select a different `--output-dir`
+for every later run. After an editable reinstall, `pokemon-interaction-run` is
+the equivalent entry point. The implemented tensors and model contract are in
+[Interaction policy v3](docs/interaction-policy-v3.md).
+
+## Mechanics-v2 result and why the architecture changed
 
 The completed mechanics-v2 run selected `final/` at 42.86% exact agreement on
 5,000 validation rows, with 64.78% top-2 and 78.78% top-3 agreement. On the
 fixed 1,024-row training-validation sample, its best checkpoint reached 41.89%,
 up from the candidate-head reference of 36.52% with the same 0.5B base model.
 
-Do not immediately repeat the same 20-hour run. The existing `data/gen9ou-dev`
-files were prepared before the current schema and lack multi-turn move history,
-accumulated opponent reveals, and legal-mask provenance. The next controlled
-experiment is to regenerate those rows into a new directory, repeat the v2
-memorization gate, and train once on the corrected data. The full result,
-capacity analysis, and prioritized architecture plan are in
+The existing `data/gen9ou-dev` files were prepared before the current schema
+and lack multi-turn move history, accumulated opponent reveals, and legal-mask
+provenance. The interaction runner now regenerates those rows, repeats a
+memorization gate, and trains once on the corrected data. The prior result,
+capacity analysis, and rationale for changing the architecture are in
 [What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
-The proposed tensor shapes, token layout, history rules, hierarchical loss, and
+The tensor shapes, token layout, history rules, hierarchical loss, and
 value-head boundary are specified in
-[Proposed interaction policy v3](docs/interaction-policy-v3.md).
+[Interaction policy v3](docs/interaction-policy-v3.md).
 
 ## Reproduce the completed experiment
 
@@ -154,6 +195,15 @@ command in this guide includes both arguments and therefore performs QLoRA.
 - Validation-based plateau stopping that preserves the best checkpoint
 - Preparation-time turn/player counts, past opponent reveals without future
   leakage, and conservative zero-PP mask refinement
+- Schema-3 trajectory rows with stable six-per-side rosters and four strictly
+  backward-looking transition events
+- A strict multi-array `interaction-v1` cache with schema fingerprints and
+  source-signature validation
+- A 30-token interaction transformer over global state, both teams, recent
+  history, and all legal candidates, with explicit switch-to-roster links
+- A normalized move/switch/Tera hierarchy and an auxiliary battle-outcome value
+  head with saved log-loss, Brier-score, and threshold-accuracy metrics
+- A 128-row memorization gate and one-command raw-data-to-report interaction run
 - Full fine-tuning, LoRA, and 4-bit QLoRA loading
 - Best-checkpoint selection by validation action accuracy for action heads, with
   action NLL as the tiebreaker; legacy SFT still uses token loss

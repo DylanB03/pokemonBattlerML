@@ -1,6 +1,7 @@
-# Proposed interaction policy v3
+# Interaction policy v3
 
-Status: design schema, not yet implemented.
+Status: implemented in August 2026. The first full GPU experiment has not yet
+been run.
 
 This document fixes the implementation boundary for the next policy. It is
 intended to prevent another long run in which the code, prepared data, cache,
@@ -71,6 +72,7 @@ Schema 3 extends the current schema-2 row rather than replacing its fields:
   "source": "archive:member",
   "split": "train",
   "turn_index": 12,
+  "battle_decision_count": 47,
   "state": {},
   "player_roster": [],
   "opponent_roster": [],
@@ -84,16 +86,19 @@ Schema 3 extends the current schema-2 row rather than replacing its fields:
 
 ### Stable rosters
 
-`player_roster` and `opponent_roster` each contain up to six Pokémon. Slots are
-sorted by normalized species name and remain stable for the trajectory.
-Generation 9 OU species clause makes duplicate species an invalid normal case;
-an occurrence is still resolved with a deterministic form-and-first-seen key.
+`player_roster` and `opponent_roster` each contain up to six Pokémon. Slots use
+a normalized species key and first-seen order, then remain stable for the
+trajectory. No absolute roster-position embedding is used, so the model cannot
+treat that storage order as strategic evidence. Generation 9 OU species clause
+makes duplicate species an invalid normal case.
 
 The player roster is accumulated from the initial active Pokémon and available
 switches, then retained after a Pokémon faints. The opponent roster begins with
 team preview species and is filled with information as it is revealed. Unknown
-item, ability, move, HP, Tera type, and status fields remain explicitly unknown;
-they are never filled from Pokédex set guesses during preparation.
+item, ability, move, HP, Tera type, and status fields remain missing or carry
+the archive's unknown sentinel; they are never filled from Pokédex set guesses
+during preparation. Cache construction pairs numeric values with known flags
+and maps missing categorical values to ID zero.
 
 Every roster entry contains:
 
@@ -101,22 +106,21 @@ Every roster entry contains:
 {
   "slot": 0,
   "side": "player",
-  "species": "greattusk",
+  "name": "greattusk",
+  "base_species": "greattusk",
   "present": true,
   "revealed": true,
   "active": false,
   "fainted": false,
-  "hp_fraction": 0.73,
-  "base_stats": {},
-  "boosts": {},
+  "hp_pct": 0.73,
   "types": [],
   "tera_type": "unknown",
   "terastallized": false,
   "status": "none",
   "item": "unknown",
   "ability": "unknown",
-  "effects": [],
-  "known_moves": []
+  "effect": "unknown",
+  "moves": []
 }
 ```
 
@@ -136,7 +140,7 @@ derived from `state[t - 1]` and the decision-time `state[t]`; it never uses
   "opponent_species_before": "corviknight",
   "opponent_species_after": "corviknight",
   "player_hp_delta": 0.0,
-  "opponent_hp_delta": 0.42,
+  "opponent_hp_delta": -0.42,
   "player_switched": false,
   "opponent_switched": false,
   "player_fainted": false,
@@ -161,18 +165,18 @@ The cache is a directory rather than one monolithic matrix:
 ```text
 train.interaction-v1/
   metadata.json
-  global_numeric.f16.npy
-  global_ids.u32.npy
-  pokemon_numeric.f16.npy
-  pokemon_ids.u32.npy
-  pokemon_mask.u8.npy
-  candidate_numeric.f16.npy
-  candidate_ids.u32.npy
-  candidate_mask.u8.npy
-  candidate_actor_slot.i8.npy
-  history_numeric.f16.npy
-  history_ids.u32.npy
-  history_mask.u8.npy
+  global_numeric.float16.npy
+  global_ids.uint32.npy
+  pokemon_numeric.float16.npy
+  pokemon_ids.uint32.npy
+  pokemon_mask.uint8.npy
+  candidate_numeric.float16.npy
+  candidate_ids.uint32.npy
+  candidate_mask.uint8.npy
+  candidate_actor_slot.int8.npy
+  history_numeric.float16.npy
+  history_ids.uint32.npy
+  history_mask.uint8.npy
 ```
 
 The first dimension of every array is the JSONL row count.
@@ -269,21 +273,23 @@ that case from no damage.
 {
   "cache_schema": "interaction-v1",
   "prepared_schema_version": 3,
-  "row_count": 286059,
-  "source_path": "data/gen9ou-dev-schema3/train.jsonl",
-  "source_size": 0,
-  "source_mtime_ns": 0,
-  "source_sha256": "sha256",
-  "array_shapes": {},
-  "numeric_feature_names": {},
-  "categorical_field_names": {},
-  "vocabulary_hashes": {},
-  "generation": 9
+  "rows": 286059,
+  "source": {
+    "path": "data/gen9ou-interaction-v1/train.jsonl",
+    "bytes": 0,
+    "modified_ns": 0,
+    "rows": 286059
+  },
+  "schema_fingerprint": "sha256",
+  "schema_descriptor": {},
+  "arrays": {},
+  "feature_names": {}
 }
 ```
 
-The loader validates every shape, feature-name list, vocabulary hash, source
-signature, and row count before exposing a memory map.
+The schema fingerprint covers every array dtype and shape, ordered feature-name
+list, and categorical vocabulary size. The loader also validates every physical
+array, source signature, and row count before exposing a memory map.
 
 ## Model input tokens
 
@@ -334,7 +340,10 @@ qwen_mode = none
 ```
 
 This is the controlled test of whether the 0.5B language model contributes
-anything beyond the structured policy.
+anything beyond the structured policy. LoRA runs save the adapter and
+interaction head together. Frozen and `none` runs save only the trained head
+and metadata, then reuse the unchanged base checkpoint during evaluation rather
+than copying 0.5B frozen weights into every ablation directory.
 
 ## Interaction encoder
 
@@ -406,18 +415,28 @@ accuracy decide whether its coefficient is retained.
 The global output token passes through a two-layer MLP to one win logit. `WIN`
 is target one and `LOSS` target zero from that row's player perspective.
 
-Rows are weighted so that a long battle does not contribute more total value
-loss merely because it has more decisions. The initial value model is assessed
-with log loss, Brier score, ROC AUC, and calibration against a constant win-rate
-baseline. Its output is not called win probability until calibration has been
-measured.
+Rows use a clipped `32 / battle_decision_count` weight. This keeps the auxiliary
+term near unit scale while reducing the repeated contribution of long battles.
+The initial runner saves row-level log loss, Brier score, and accuracy at 0.5.
+ROC AUC, reliability bins, and comparison with a constant win-rate baseline are
+follow-up diagnostics. Its output is not called win probability until
+calibration has been measured.
 
 The value head is auxiliary in the first policy run. Offline RL and search are
 separate later stages; they are not silently enabled by this schema.
 
-## Training stages
+## Implemented run and controlled follow-ups
 
-Each stage changes one major variable:
+The integrated command is:
+
+```bash
+.venv/bin/python -m pokemon_battler.interaction_experiment
+```
+
+It prepares schema-3 data, builds caches, runs the 128-row gate, trains one
+epoch with the hierarchical and value auxiliaries, evaluates `best/` and
+`final/`, and writes one summary. The following controlled ablations remain
+separate experiments so each changes one major variable:
 
 1. Prepare schema-3 rows and build the interaction cache.
 2. Verify strict no-future-leakage and action-to-roster mappings with unit tests.
@@ -431,20 +450,21 @@ Each stage changes one major variable:
 
 No test split is opened during these stages.
 
-## Required reports
+## Reports
 
-Every validation report includes:
+The current validation report includes:
 
 - exact, top-2, and top-3 action agreement;
 - candidate NLL and mean reciprocal rank;
-- ordinary-move, switch, and Tera precision and recall;
-- family confusion matrix;
-- results split by exact, PP-aware, and recoverable legal masks;
-- early-, middle-, and late-battle slices;
-- performance by number of revealed opponent moves and Pokémon;
-- value metrics and reliability bins when the value head is enabled;
+- exact accuracy by ordinary-move, switch, and Tera target family;
+- action-family accuracy, entropy, prediction and target histograms;
+- row-level value log loss, Brier score, and accuracy at 0.5;
 - Qwen mode, trainable parameter count, peak VRAM, examples per second, and
-  elapsed time.
+  elapsed time in training metadata and history.
+
+Family precision/recall and confusion, legal-mask-quality slices, battle-phase
+slices, reveal-count slices, and value reliability bins remain report-only
+follow-ups; they do not block the first architecture run.
 
 ## Acceptance rules
 

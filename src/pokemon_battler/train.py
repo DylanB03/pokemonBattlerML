@@ -24,17 +24,22 @@ from pokemon_battler.modeling import (
     attach_lora,
     candidate_head_loss,
     create_candidate_head,
+    create_interaction_head,
     create_mechanics_head,
     create_policy_head,
     indexed_logits_parameter,
+    interaction_head_loss,
+    interaction_outputs,
     load_policy_model,
     masked_candidate_logits,
+    masked_interaction_logits,
     masked_mechanics_logits,
     masked_policy_logits,
     mechanics_head_loss,
     policy_head_loss,
     resolve_dtype,
     save_candidate_head,
+    save_interaction_head,
     save_mechanics_head,
     save_policy_head,
 )
@@ -46,12 +51,21 @@ from pokemon_battler.mechanics_v2 import (
     MECHANICS_IDENTITY_VOCAB_SIZES,
     MECHANICS_SCHEMA,
 )
+from pokemon_battler.interaction_cache import InteractionCacheDataset
+from pokemon_battler.interaction_features import (
+    INTERACTION_CACHE_SCHEMA,
+    INTERACTION_MODEL_SCHEMA,
+    INTERACTION_VOCAB_SIZES,
+    PREPARED_SCHEMA_VERSION,
+)
+from pokemon_battler.interaction_modeling import InteractionPolicyHead
 from pokemon_battler.prompting import PROMPT_FORMATS
 from pokemon_battler.training_data import (
     CandidateCollator,
     JsonlOffsetDataset,
     MechanicsCacheDataset,
     MechanicsCollator,
+    InteractionCollator,
     PolicyCollator,
     SFTCollator,
 )
@@ -65,7 +79,12 @@ DEFAULT_LORA_TARGETS = (
     "up_proj",
     "down_proj",
 )
-ACTION_OBJECTIVES = {"policy-head", "candidate-head", "mechanics-head"}
+ACTION_OBJECTIVES = {
+    "policy-head",
+    "candidate-head",
+    "mechanics-head",
+    "interaction-head",
+}
 
 
 def set_seed(seed: int) -> None:
@@ -136,6 +155,13 @@ def _action_logits(
             batch,
             logits_parameter=logits_parameter,
         )
+    if objective == "interaction-head":
+        return masked_interaction_logits(
+            model,
+            action_head,
+            batch,
+            logits_parameter=logits_parameter,
+        )
     return masked_policy_logits(
         model,
         action_head,
@@ -151,7 +177,20 @@ def _action_loss(
     objective: str,
     logits_parameter: str | None,
     class_weights: torch.Tensor | None = None,
+    family_weights: torch.Tensor | None = None,
+    family_aux_weight: float = 0.25,
+    value_loss_weight: float = 0.25,
 ) -> torch.Tensor:
+    if objective == "interaction-head":
+        return interaction_head_loss(
+            model,
+            action_head,
+            batch,
+            logits_parameter=logits_parameter,
+            family_weights=family_weights,
+            family_aux_weight=family_aux_weight,
+            value_loss_weight=value_loss_weight,
+        )
     if class_weights is not None:
         logits = _action_logits(
             model,
@@ -205,6 +244,10 @@ def _evaluate_model(
     top_k_correct: Counter[int] = Counter()
     reciprocal_rank_sum = 0.0
     entropy_sum = 0.0
+    value_log_loss_sum = 0.0
+    value_brier_sum = 0.0
+    value_correct = 0
+    value_examples = 0
     target_kind: Counter[str] = Counter()
     correct_kind: Counter[str] = Counter()
     target_family: Counter[str] = Counter()
@@ -219,19 +262,52 @@ def _evaluate_model(
             with _autocast_context(device, dtype):
                 if objective in ACTION_OBJECTIVES:
                     assert action_head is not None
-                    logits = _action_logits(
-                        model,
-                        action_head,
-                        batch,
-                        objective,
-                        logits_parameter,
-                    )
+                    interaction_result = None
+                    if objective == "interaction-head":
+                        interaction_result = interaction_outputs(
+                            model,
+                            action_head,
+                            batch,
+                            logits_parameter=logits_parameter,
+                        )
+                        logits = interaction_result["action_log_probs"]
+                    else:
+                        logits = _action_logits(
+                            model,
+                            action_head,
+                            batch,
+                            objective,
+                            logits_parameter,
+                        )
                     targets = batch["action_ids"].to(logits.device)
                     loss = torch.nn.functional.cross_entropy(
                         logits,
                         targets,
                         reduction="sum",
                     )
+                    if interaction_result is not None:
+                        value_targets = batch["value_targets"].to(logits.device)
+                        value_mask = value_targets >= 0
+                        if bool(value_mask.any()):
+                            value_logits = interaction_result["value_logits"][value_mask].float()
+                            selected_targets = value_targets[value_mask].float()
+                            value_probabilities = torch.sigmoid(value_logits)
+                            value_log_loss_sum += float(
+                                torch.nn.functional.binary_cross_entropy_with_logits(
+                                    value_logits,
+                                    selected_targets,
+                                    reduction="sum",
+                                ).item()
+                            )
+                            value_brier_sum += float(
+                                ((value_probabilities - selected_targets) ** 2).sum().item()
+                            )
+                            value_correct += int(
+                                ((value_probabilities >= 0.5) == selected_targets.bool())
+                                .sum()
+                                .item()
+                            )
+                            value_examples += int(selected_targets.numel())
                 else:
                     loss = assistant_only_loss(
                         model,
@@ -280,7 +356,7 @@ def _evaluate_model(
         return {"validation_loss": sum(losses) / len(losses) if losses else math.nan}
     if total_examples == 0:
         return {"validation_loss": math.nan}
-    return {
+    report = {
         "validation_loss": total_loss / total_examples,
         "validation_accuracy": correct / total_examples,
         "validation_top_k_accuracy": {
@@ -301,6 +377,14 @@ def _evaluate_model(
         "validation_prediction_counts": dict(sorted(prediction_counts.items())),
         "validation_examples_evaluated": total_examples,
     }
+    if value_examples:
+        report["validation_value"] = {
+            "examples": value_examples,
+            "log_loss": value_log_loss_sum / value_examples,
+            "brier_score": value_brier_sum / value_examples,
+            "accuracy_at_0_5": value_correct / value_examples,
+        }
+    return report
 
 
 def _save_checkpoint(
@@ -312,13 +396,22 @@ def _save_checkpoint(
     objective: str = "sft",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(output_dir, safe_serialization=True)
+    head_only_interaction = (
+        objective == "interaction-head"
+        and isinstance(action_head, InteractionPolicyHead)
+        and action_head.qwen_mode in {"frozen", "none"}
+    )
+    if not head_only_interaction:
+        model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)
     if action_head is not None:
         if objective == "candidate-head":
             save_candidate_head(action_head, output_dir)
         elif objective == "mechanics-head":
             save_mechanics_head(action_head, output_dir)
+        elif objective == "interaction-head":
+            save_interaction_head(action_head, output_dir)
+            training_config = training_config | action_head.config()
         else:
             save_policy_head(action_head, output_dir)
     (output_dir / "training_config.json").write_text(
@@ -374,6 +467,29 @@ def _training_class_weights(
     return torch.tensor(values, dtype=torch.float32, device=device), values
 
 
+def _training_family_weights(
+    train_file: str,
+    maximum_weight: float,
+    device: torch.device,
+) -> tuple[torch.Tensor, list[float]]:
+    counts = load_action_counts(train_file)
+    family_counts = [
+        sum(counts[action_id] for action_id in range(4)),
+        sum(counts[action_id] for action_id in range(4, 9)),
+        sum(counts[action_id] for action_id in range(9, 13)),
+    ]
+    largest = max(family_counts)
+    values = [
+        min(math.sqrt(largest / max(count, 1)), maximum_weight)
+        for count in family_counts
+    ]
+    weighted_mean = sum(
+        value * count for value, count in zip(values, family_counts)
+    ) / sum(family_counts)
+    values = [value / weighted_mean for value in values]
+    return torch.tensor(values, dtype=torch.float32, device=device), values
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     positive_values = {
         "epochs": args.epochs,
@@ -398,6 +514,26 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("scheduler_steps must be positive")
     if args.max_class_weight < 1:
         raise ValueError("max_class_weight must be at least 1")
+    if args.family_aux_weight < 0 or args.value_loss_weight < 0:
+        raise ValueError("interaction auxiliary loss weights cannot be negative")
+    if args.objective == "interaction-head":
+        interaction_positive = {
+            "interaction_d_model": args.interaction_d_model,
+            "interaction_attention_heads": args.interaction_attention_heads,
+            "interaction_layers": args.interaction_layers,
+            "interaction_feedforward_size": args.interaction_feedforward_size,
+            "interaction_identity_embedding_size": args.interaction_identity_embedding_size,
+        }
+        invalid_interaction = [
+            name for name, value in interaction_positive.items() if value <= 0
+        ]
+        if invalid_interaction:
+            raise ValueError(
+                "These interaction arguments must be positive: "
+                + ", ".join(invalid_interaction)
+            )
+        if not 0 <= args.interaction_dropout < 1:
+            raise ValueError("interaction_dropout must be in [0, 1)")
     if args.early_stopping_patience < 0:
         raise ValueError("early_stopping_patience cannot be negative")
     if args.early_stopping_min_delta < 0:
@@ -416,6 +552,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         args.mechanics_identity_count = MECHANICS_IDENTITY_COUNT
         args.mechanics_identity_names = list(MECHANICS_IDENTITY_NAMES)
         args.mechanics_identity_vocab_sizes = dict(MECHANICS_IDENTITY_VOCAB_SIZES)
+    if args.objective == "interaction-head":
+        if not args.train_interaction_cache:
+            raise ValueError("interaction-head requires --train-interaction-cache")
+        args.prepared_schema_version = PREPARED_SCHEMA_VERSION
+        args.interaction_cache_schema = INTERACTION_CACHE_SCHEMA
+        args.interaction_model_schema = INTERACTION_MODEL_SCHEMA
+        args.interaction_vocab_sizes = dict(INTERACTION_VOCAB_SIZES)
 
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
@@ -434,7 +577,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         attn_implementation=args.attn_implementation,
     )
     dtype = resolve_dtype(args.dtype, device)
-    if args.method == "lora":
+    if args.objective == "interaction-head" and args.qwen_mode in {"frozen", "none"}:
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+    elif args.method == "lora":
         model = attach_lora(
             model,
             rank=args.lora_rank,
@@ -469,6 +615,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         action_head = create_candidate_head(model, device)
     elif args.objective == "mechanics-head":
         action_head = create_mechanics_head(model, device, schema=MECHANICS_SCHEMA)
+    elif args.objective == "interaction-head":
+        action_head = create_interaction_head(
+            model,
+            device,
+            d_model=args.interaction_d_model,
+            attention_heads=args.interaction_attention_heads,
+            layers=args.interaction_layers,
+            feedforward_size=args.interaction_feedforward_size,
+            dropout=args.interaction_dropout,
+            identity_embedding_size=args.interaction_identity_embedding_size,
+            qwen_mode=args.qwen_mode,
+        )
     else:
         action_head = None
     print(
@@ -503,6 +661,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             args.train_mechanics_cache,
             mechanics_schema=MECHANICS_SCHEMA,
         )
+    if args.objective == "interaction-head":
+        train_dataset = InteractionCacheDataset(
+            train_dataset,
+            args.train_interaction_cache,
+        )
     class_weights, serialized_class_weights = _training_class_weights(
         args.train_file,
         args.class_weighting,
@@ -518,6 +681,25 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         ),
         flush=True,
     )
+    if args.objective == "interaction-head":
+        family_weights, serialized_family_weights = _training_family_weights(
+            args.train_file,
+            args.max_class_weight,
+            device,
+        )
+        print(
+            json.dumps(
+                {
+                    "family_aux_weight": args.family_aux_weight,
+                    "family_weights": serialized_family_weights,
+                    "value_loss_weight": args.value_loss_weight,
+                    "qwen_mode": args.qwen_mode,
+                }
+            ),
+            flush=True,
+        )
+    else:
+        family_weights = None
     validation_sample_metadata: dict[str, Any] | None = None
     if args.validation_file:
         complete_validation_dataset: Any = JsonlOffsetDataset(args.validation_file)
@@ -526,6 +708,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 complete_validation_dataset,
                 args.validation_mechanics_cache,
                 mechanics_schema=MECHANICS_SCHEMA,
+            )
+        if args.objective == "interaction-head":
+            if not args.validation_interaction_cache:
+                raise ValueError(
+                    "interaction-head validation requires --validation-interaction-cache"
+                )
+            complete_validation_dataset = InteractionCacheDataset(
+                complete_validation_dataset,
+                args.validation_interaction_cache,
             )
         validation_dataset, validation_sample_metadata = select_evaluation_dataset(
             complete_validation_dataset,
@@ -540,6 +731,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "policy-head": PolicyCollator,
         "candidate-head": CandidateCollator,
         "mechanics-head": MechanicsCollator,
+        "interaction-head": InteractionCollator,
     }
     collator_kwargs: dict[str, Any] = {
         "max_length": args.max_length,
@@ -581,7 +773,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     model_trainable_parameters = [
         parameter for parameter in model.parameters() if parameter.requires_grad
     ]
-    head_parameters = list(action_head.parameters()) if action_head is not None else []
+    head_parameters = (
+        [parameter for parameter in action_head.parameters() if parameter.requires_grad]
+        if action_head is not None
+        else []
+    )
     trainable_parameters = [*model_trainable_parameters, *head_parameters]
     if not trainable_parameters:
         raise RuntimeError("No trainable parameters were found")
@@ -647,6 +843,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "training_updates": training_updates,
         "scheduler_updates": scheduler_updates,
         "expected_dataset_passes": round(expected_passes, 4),
+        "model_trainable_parameters": sum(
+            parameter.numel() for parameter in model_trainable_parameters
+        ),
+        "head_trainable_parameters": sum(parameter.numel() for parameter in head_parameters),
+        "total_trainable_parameters": sum(parameter.numel() for parameter in trainable_parameters),
     }
     print(json.dumps(run_shape), flush=True)
     if expected_passes < 1 and not args.overfit_examples:
@@ -763,6 +964,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         args.objective,
                         logits_parameter,
                         class_weights,
+                        family_weights,
+                        args.family_aux_weight,
+                        args.value_loss_weight,
                     )
                 else:
                     batch_loss = assistant_only_loss(
@@ -954,11 +1158,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", choices=("lora", "full"), default="lora")
     parser.add_argument(
         "--objective",
-        choices=("sft", "policy-head", "candidate-head", "mechanics-head"),
+        choices=(
+            "sft",
+            "policy-head",
+            "candidate-head",
+            "mechanics-head",
+            "interaction-head",
+        ),
         default="mechanics-head",
         help=(
             "Use legacy generative SFT, a fixed 13-way head, a shared text-candidate "
-            "scorer, or the zero-token numeric mechanics scorer."
+            "scorer, the numeric mechanics scorer, or the structured interaction policy."
         ),
     )
     parser.add_argument(
@@ -1038,6 +1248,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--validation-mechanics-cache",
         help="Optional mechanics-v2 .npy cache aligned with the validation JSONL.",
     )
+    parser.add_argument(
+        "--train-interaction-cache",
+        help="Required interaction-v1 cache directory aligned with training JSONL.",
+    )
+    parser.add_argument(
+        "--validation-interaction-cache",
+        help="Interaction-v1 cache directory aligned with validation JSONL.",
+    )
+    parser.add_argument("--interaction-d-model", type=int, default=384)
+    parser.add_argument("--interaction-attention-heads", type=int, default=8)
+    parser.add_argument("--interaction-layers", type=int, default=4)
+    parser.add_argument("--interaction-feedforward-size", type=int, default=1536)
+    parser.add_argument("--interaction-dropout", type=float, default=0.1)
+    parser.add_argument("--interaction-identity-embedding-size", type=int, default=16)
+    parser.add_argument(
+        "--qwen-mode",
+        choices=("lora", "frozen", "none"),
+        default="lora",
+        help="Use LoRA Qwen, frozen Qwen, or structured tokens without Qwen state.",
+    )
+    parser.add_argument("--family-aux-weight", type=float, default=0.25)
+    parser.add_argument("--value-loss-weight", type=float, default=0.25)
     parser.add_argument("--num-workers", type=int, default=0)
 
     parser.add_argument(

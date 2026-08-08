@@ -101,6 +101,7 @@ class PrepareTests(unittest.TestCase):
                 .splitlines()
             ]
             self.assertEqual(rows[0]["target"], "A0")
+            self.assertEqual(rows[0]["schema_version"], 3)
             self.assertIn(0, rows[0]["legal_action_ids"])
             self.assertEqual(rows[0]["state"]["turn_index"], 0)
             self.assertEqual(rows[0]["state"]["player_remaining"], 3)
@@ -109,6 +110,12 @@ class PrepareTests(unittest.TestCase):
                 rows[0]["state"]["recent_move_history"],
                 [{"player": "protect", "opponent": "saltcure"}],
             )
+            self.assertEqual(rows[0]["history_events"], [])
+            self.assertEqual(
+                {pokemon["name"] for pokemon in rows[0]["player_roster"]},
+                {"zoroark", "charizard", "alakazam"},
+            )
+            self.assertTrue(all(pokemon["revealed"] for pokemon in rows[0]["player_roster"]))
 
     def test_preparation_history_does_not_leak_future_reveals(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -150,6 +157,62 @@ class PrepareTests(unittest.TestCase):
             }
             self.assertNotIn("dragapult", first_names)
             self.assertIn("dragapult", second_names)
+            first_dragapult = next(
+                pokemon
+                for pokemon in rows[0]["opponent_roster"]
+                if pokemon["name"] == "dragapult"
+            )
+            second_dragapult = next(
+                pokemon
+                for pokemon in rows[1]["opponent_roster"]
+                if pokemon["name"] == "dragapult"
+            )
+            self.assertFalse(first_dragapult["revealed"])
+            self.assertTrue(second_dragapult["revealed"])
+            self.assertEqual(rows[0]["history_events"], [])
+            self.assertEqual(len(rows[1]["history_events"]), 1)
+            self.assertEqual(
+                rows[1]["history_events"][0]["opponent_species_after"],
+                "dragapult",
+            )
+
+    def test_schema_three_history_uses_only_past_transitions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_dir = root / "raw"
+            raw_dir.mkdir()
+            states = [state() for _ in range(7)]
+            for index, battle_state in enumerate(states):
+                battle_state["player_prev_move"]["name"] = f"move-{index}"
+            terminal = terminal_state()
+            terminal["player_prev_move"]["name"] = "future-secret"
+            states.append(terminal)
+            source = raw_dir / "battle-10_1800_a_vs_b_01-02-2025_WIN.json"
+            source.write_text(
+                json.dumps({"states": states, "actions": [0] * 7 + [-1]}),
+                encoding="utf-8",
+            )
+            prepare_dataset(
+                [raw_dir],
+                root / "prepared",
+                split_config=SplitConfig(
+                    mode="chronological",
+                    validation_start=date(2025, 2, 1),
+                    test_start=date(2025, 3, 1),
+                ),
+            )
+            rows = [
+                json.loads(line)
+                for line in (root / "prepared" / "train.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(len(rows[-1]["history_events"]), 4)
+            self.assertEqual(
+                [event["player_move"] for event in rows[-1]["history_events"]],
+                ["move-3", "move-4", "move-5", "move-6"],
+            )
+            self.assertNotIn("future-secret", json.dumps(rows[-1]["history_events"]))
 
 
 if __name__ == "__main__":

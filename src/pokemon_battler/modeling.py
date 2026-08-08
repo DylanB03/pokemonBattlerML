@@ -23,6 +23,15 @@ from pokemon_battler.mechanics_v2 import (
     candidate_feature_matrix,
     candidate_identity_matrix,
 )
+from pokemon_battler.interaction_features import (
+    INTERACTION_MODEL_SCHEMA,
+    INTERACTION_VOCAB_SIZES,
+)
+from pokemon_battler.interaction_modeling import (
+    INTERACTION_HEAD_FILENAME,
+    InteractionPolicyHead,
+    interaction_policy_loss,
+)
 from pokemon_battler.prompting import encode_candidate_prompt, render_prompt
 
 POLICY_HEAD_FILENAME = "policy_head.safetensors"
@@ -358,6 +367,30 @@ def create_mechanics_head(
     return head
 
 
+def create_interaction_head(
+    model: Any,
+    device: torch.device,
+    *,
+    d_model: int = 384,
+    attention_heads: int = 8,
+    layers: int = 4,
+    feedforward_size: int = 1536,
+    dropout: float = 0.1,
+    identity_embedding_size: int = 16,
+    qwen_mode: str = "lora",
+) -> InteractionPolicyHead:
+    return InteractionPolicyHead(
+        int(model.config.hidden_size),
+        d_model=d_model,
+        attention_heads=attention_heads,
+        layers=layers,
+        feedforward_size=feedforward_size,
+        dropout=dropout,
+        identity_embedding_size=identity_embedding_size,
+        qwen_mode=qwen_mode,
+    ).to(device=device, dtype=torch.float32)
+
+
 def save_policy_head(head: torch.nn.Linear, output_dir: str | Path) -> None:
     output_path = Path(output_dir) / POLICY_HEAD_FILENAME
     state = {
@@ -442,6 +475,50 @@ def load_mechanics_head(
 
 def has_mechanics_head(adapter_path: str | Path | None) -> bool:
     return bool(adapter_path) and (Path(adapter_path) / MECHANICS_HEAD_FILENAME).is_file()
+
+
+def save_interaction_head(head: InteractionPolicyHead, output_dir: str | Path) -> None:
+    output_path = Path(output_dir) / INTERACTION_HEAD_FILENAME
+    state = {
+        key: value.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        for key, value in head.state_dict().items()
+    }
+    save_safetensors(state, output_path)
+
+
+def load_interaction_head(
+    model: Any,
+    adapter_path: str | Path,
+    device: torch.device,
+) -> InteractionPolicyHead:
+    path = Path(adapter_path) / INTERACTION_HEAD_FILENAME
+    if not path.is_file():
+        raise FileNotFoundError(f"Interaction-head checkpoint does not exist: {path}")
+    metadata = load_training_metadata(adapter_path)
+    if metadata.get("interaction_model_schema") != INTERACTION_MODEL_SCHEMA:
+        raise ValueError("Interaction checkpoint model schema does not match this code")
+    recorded_vocabs = metadata.get("interaction_vocab_sizes")
+    if recorded_vocabs is not None and recorded_vocabs != INTERACTION_VOCAB_SIZES:
+        raise ValueError("Interaction checkpoint categorical vocabularies do not match")
+    head = create_interaction_head(
+        model,
+        device,
+        d_model=int(metadata.get("interaction_d_model", 384)),
+        attention_heads=int(metadata.get("interaction_attention_heads", 8)),
+        layers=int(metadata.get("interaction_layers", 4)),
+        feedforward_size=int(metadata.get("interaction_feedforward_size", 1536)),
+        dropout=float(metadata.get("interaction_dropout", 0.1)),
+        identity_embedding_size=int(
+            metadata.get("interaction_identity_embedding_size", 16)
+        ),
+        qwen_mode=str(metadata.get("qwen_mode", "lora")),
+    )
+    head.load_state_dict(load_safetensors(path, device=str(device)))
+    return head
+
+
+def has_interaction_head(adapter_path: str | Path | None) -> bool:
+    return bool(adapter_path) and (Path(adapter_path) / INTERACTION_HEAD_FILENAME).is_file()
 
 
 def _last_hidden_states(
@@ -554,6 +631,73 @@ def masked_mechanics_logits(
     if not bool(legal_mask.any(dim=1).all()):
         raise ValueError("Every mechanics-head example must contain a legal action")
     return logits.masked_fill(~legal_mask, float("-inf"))
+
+
+def interaction_outputs(
+    model: Any,
+    interaction_head: InteractionPolicyHead,
+    batch: dict[str, torch.Tensor],
+    *,
+    logits_parameter: str | None,
+) -> dict[str, torch.Tensor]:
+    if interaction_head.qwen_mode == "none":
+        batch_size = int(batch["input_ids"].shape[0])
+        state_hidden = torch.zeros(
+            (batch_size, interaction_head.qwen_hidden_size),
+            dtype=torch.float32,
+            device=batch["input_ids"].device,
+        )
+    else:
+        hidden_states = _last_hidden_states(
+            model,
+            batch,
+            logits_parameter=logits_parameter,
+        )
+        last_positions = batch["attention_mask"].sum(dim=1) - 1
+        rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+        state_hidden = hidden_states[rows, last_positions]
+    return interaction_head(state_hidden, batch)
+
+
+def masked_interaction_logits(
+    model: Any,
+    interaction_head: InteractionPolicyHead,
+    batch: dict[str, torch.Tensor],
+    *,
+    logits_parameter: str | None,
+) -> torch.Tensor:
+    return interaction_outputs(
+        model,
+        interaction_head,
+        batch,
+        logits_parameter=logits_parameter,
+    )["action_log_probs"]
+
+
+def interaction_head_loss(
+    model: Any,
+    interaction_head: InteractionPolicyHead,
+    batch: dict[str, torch.Tensor],
+    *,
+    logits_parameter: str | None,
+    family_weights: torch.Tensor | None = None,
+    family_aux_weight: float = 0.25,
+    value_loss_weight: float = 0.25,
+) -> torch.Tensor:
+    outputs = interaction_outputs(
+        model,
+        interaction_head,
+        batch,
+        logits_parameter=logits_parameter,
+    )
+    loss, _ = interaction_policy_loss(
+        outputs,
+        batch,
+        family_weights=family_weights,
+        family_aux_weight=family_aux_weight,
+        value_loss_weight=value_loss_weight,
+    )
+    return loss
 
 
 def policy_head_loss(

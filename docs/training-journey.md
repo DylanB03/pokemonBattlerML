@@ -458,3 +458,28 @@ then, buying more parameters would hide the diagnosis.
 The concrete experiment order and the comparison with published Pokémon agents
 are in
 [What mechanics-v2 proved, and what should change next](mechanics-v2-results-and-next-steps.md).
+
+## I built the next experiment as one pipeline
+
+The raw archive already had ordered trajectories. I had been throwing most of
+that structure away when I wrote isolated decision rows. The new preparer walks
+each battle in order and writes a schema-3 row with stable rosters and the last
+four observable transitions. It can use earlier unsampled turns as context, but
+never a state after the target action.
+
+I kept the 207 numeric mechanics values and 32 identity fields for each action.
+The difference is where they meet. A small transformer now sees one global
+token, up to twelve Pokémon, four history events, and thirteen action
+candidates. A switch candidate is explicitly linked to the Pokémon it would
+bring in. Legal actions are normalized through a move/switch/Tera hierarchy,
+and an auxiliary head tries to predict the battle outcome from the global
+state. Qwen remains a global residual rather than the only representation of
+the battle.
+
+I also removed the manual gap between data preparation and training. One
+command scans the archive, builds version-checked caches, attempts to memorize
+128 examples, and only then starts the full run. It preserves the gate model,
+the best checkpoint, and the final checkpoint in separate directories. That
+does not guarantee a better result. It does mean the next result will test the
+architecture I intended, on the data schema I intended, without quietly
+reusing the old isolated rows.

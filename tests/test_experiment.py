@@ -4,6 +4,11 @@ import tempfile
 import unittest
 
 from pokemon_battler.experiment import _train_arguments, build_parser
+from pokemon_battler.interaction_experiment import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_DIR,
+    build_parser as build_interaction_parser,
+)
 
 
 class ExperimentTests(unittest.TestCase):
@@ -22,6 +27,17 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(train_args.attn_implementation, "sdpa")
         self.assertEqual(train_args.early_stopping_patience, 4)
         self.assertEqual(train_args.early_stopping_min_delta, 0.002)
+
+    def test_interaction_run_owns_data_preparation_and_training_defaults(self) -> None:
+        args = build_interaction_parser().parse_args([])
+        self.assertEqual(args.data_dir, DEFAULT_DATA_DIR)
+        self.assertEqual(args.output_dir, DEFAULT_OUTPUT_DIR)
+        self.assertEqual(args.sample_rate, 0.02)
+        self.assertEqual(args.interaction_d_model, 384)
+        self.assertEqual(args.interaction_layers, 4)
+        self.assertEqual(args.family_aux_weight, 0.25)
+        self.assertEqual(args.value_loss_weight, 0.25)
+        self.assertFalse(args.skip_overfit_gate)
 
 
 if __name__ == "__main__":

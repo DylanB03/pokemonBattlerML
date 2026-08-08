@@ -279,6 +279,176 @@ def _merge_revealed_pokemon(
     return merged
 
 
+def _pokemon_key(pokemon: dict[str, Any] | None) -> str:
+    if not pokemon:
+        return ""
+    value = pokemon.get("base_species") or pokemon.get("name") or ""
+    return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _preview_pokemon(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        name = value.get("base_species") or value.get("name")
+        if not name:
+            return None
+        return copy.deepcopy(value)
+    if not value:
+        return None
+    return {"name": str(value), "base_species": str(value)}
+
+
+def _observe_rosters(
+    state: dict[str, Any],
+    previous_state: dict[str, Any] | None,
+    player_roster: dict[str, dict[str, Any]],
+    player_order: list[str],
+    opponent_roster: dict[str, dict[str, Any]],
+    opponent_order: list[str],
+) -> None:
+    def add(
+        roster: dict[str, dict[str, Any]],
+        order: list[str],
+        pokemon: dict[str, Any],
+        *,
+        revealed: bool,
+    ) -> str:
+        key = _pokemon_key(pokemon)
+        if not key:
+            return ""
+        if key not in roster:
+            roster[key] = {}
+            order.append(key)
+        roster[key] = _merge_revealed_pokemon(roster[key], pokemon)
+        roster[key]["present"] = True
+        roster[key]["revealed"] = bool(roster[key].get("revealed", False) or revealed)
+        return key
+
+    player_current: set[str] = set()
+    for pokemon in [state.get("player_active_pokemon"), *(state.get("available_switches") or [])]:
+        if isinstance(pokemon, dict):
+            key = add(player_roster, player_order, pokemon, revealed=True)
+            if key:
+                player_current.add(key)
+    # Once a player Pokémon has disappeared from both the active and switch lists,
+    # the replay state no longer exposes it because it has fainted. Retain its slot.
+    for key, pokemon in player_roster.items():
+        if key not in player_current:
+            pokemon["fainted"] = True
+            pokemon["hp_pct"] = 0.0
+
+    for preview in state.get("opponent_teampreview") or []:
+        pokemon = _preview_pokemon(preview)
+        if pokemon is not None:
+            add(opponent_roster, opponent_order, pokemon, revealed=False)
+    opponent = state.get("opponent_active_pokemon")
+    if isinstance(opponent, dict):
+        add(opponent_roster, opponent_order, opponent, revealed=True)
+
+    if previous_state is not None:
+        before_remaining = int(previous_state.get("opponents_remaining", 0) or 0)
+        after_remaining = int(state.get("opponents_remaining", 0) or 0)
+        before_active = previous_state.get("opponent_active_pokemon")
+        before_key = _pokemon_key(before_active if isinstance(before_active, dict) else None)
+        if after_remaining < before_remaining and before_key in opponent_roster:
+            opponent_roster[before_key]["fainted"] = True
+            opponent_roster[before_key]["hp_pct"] = 0.0
+
+
+def _roster_snapshot(
+    roster: dict[str, dict[str, Any]],
+    order: list[str],
+    active: dict[str, Any] | None,
+    side: str,
+) -> list[dict[str, Any]]:
+    active_key = _pokemon_key(active)
+    rows: list[dict[str, Any]] = []
+    for slot, key in enumerate(order[:6]):
+        pokemon = copy.deepcopy(roster[key])
+        pokemon["slot"] = slot
+        pokemon["side"] = side
+        pokemon["active"] = key == active_key
+        status = str(pokemon.get("status", "")).lower()
+        hp = pokemon.get("hp_pct")
+        pokemon["fainted"] = bool(
+            pokemon.get("fainted", False)
+            or status == "fnt"
+            or isinstance(hp, (int, float)) and hp <= 0
+        )
+        rows.append(pokemon)
+    return rows
+
+
+def _player_remaining(state: dict[str, Any]) -> int:
+    active = state.get("player_active_pokemon") or {}
+    active_alive = float(active.get("hp_pct", 0) or 0) > 0 and active.get("status") != "fnt"
+    return len(state.get("available_switches") or []) + int(active_alive)
+
+
+def _move_name(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("name") or "unknown")
+    return str(value or "unknown")
+
+
+def _history_event(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    player_before = previous.get("player_active_pokemon") or {}
+    player_after = current.get("player_active_pokemon") or {}
+    opponent_before = previous.get("opponent_active_pokemon") or {}
+    opponent_after = current.get("opponent_active_pokemon") or {}
+    player_switched = _pokemon_key(player_before) != _pokemon_key(player_after)
+    opponent_switched = _pokemon_key(opponent_before) != _pokemon_key(opponent_after)
+
+    def hp_delta(before: dict[str, Any], after: dict[str, Any], switched: bool) -> float:
+        if switched:
+            return 0.0
+        before_hp = before.get("hp_pct")
+        after_hp = after.get("hp_pct")
+        if not isinstance(before_hp, (int, float)) or not isinstance(after_hp, (int, float)):
+            return 0.0
+        return max(min(float(after_hp) - float(before_hp), 1.0), -1.0)
+
+    player_fainted = _player_remaining(current) < _player_remaining(previous)
+    opponent_fainted = int(current.get("opponents_remaining", 0) or 0) < int(
+        previous.get("opponents_remaining", 0) or 0
+    )
+    return {
+        "decision_offset": -1,
+        "player_move": _move_name(current.get("player_prev_move")),
+        "opponent_move": _move_name(current.get("opponent_prev_move")),
+        "player_species_before": str(player_before.get("name") or "unknown"),
+        "player_species_after": str(player_after.get("name") or "unknown"),
+        "opponent_species_before": str(opponent_before.get("name") or "unknown"),
+        "opponent_species_after": str(opponent_after.get("name") or "unknown"),
+        "player_hp_delta": hp_delta(player_before, player_after, player_switched),
+        "opponent_hp_delta": hp_delta(opponent_before, opponent_after, opponent_switched),
+        "player_switched": player_switched,
+        "opponent_switched": opponent_switched,
+        "player_fainted": player_fainted,
+        "opponent_fainted": opponent_fainted,
+        "player_status_changed": player_before.get("status") != player_after.get("status"),
+        "opponent_status_changed": (
+            opponent_before.get("status") != opponent_after.get("status")
+        ),
+        "player_conditions_changed": (
+            previous.get("player_conditions") != current.get("player_conditions")
+        ),
+        "opponent_conditions_changed": (
+            previous.get("opponent_conditions") != current.get("opponent_conditions")
+        ),
+        "field_or_weather_changed": (
+            previous.get("battle_field") != current.get("battle_field")
+            or previous.get("weather") != current.get("weather")
+        ),
+    }
+
+
+def _history_snapshot(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected = copy.deepcopy(events[-4:])
+    for index, event in enumerate(selected):
+        event["decision_offset"] = index - len(selected)
+    return selected
+
+
 def _observe_opponent(
     state: dict[str, Any],
     revealed_opponents: dict[str, dict[str, Any]],
@@ -372,6 +542,12 @@ def _trajectory_rows(
 
     revealed_opponents: dict[str, dict[str, Any]] = {}
     recent_moves: list[dict[str, str]] = []
+    player_roster: dict[str, dict[str, Any]] = {}
+    opponent_roster: dict[str, dict[str, Any]] = {}
+    player_order: list[str] = []
+    opponent_order: list[str] = []
+    history_events: list[dict[str, Any]] = []
+    previous_state: dict[str, Any] | None = None
 
     # Metamon deliberately pairs states[:-1] with actions[:-1]. The final state
     # is terminal and has no decision target.
@@ -379,8 +555,20 @@ def _trajectory_rows(
         if not isinstance(state, dict) or not isinstance(action_id, int):
             counters["malformed_turns"] += 1
             continue
+        if previous_state is not None:
+            history_events.append(_history_event(previous_state, state))
+            del history_events[:-4]
+        _observe_rosters(
+            state,
+            previous_state,
+            player_roster,
+            player_order,
+            opponent_roster,
+            opponent_order,
+        )
         _observe_opponent(state, revealed_opponents)
         _observe_move_history(state, recent_moves)
+        previous_state = state
         if action_id == -1:
             counters["missing_actions"] += 1
             continue
@@ -414,15 +602,29 @@ def _trajectory_rows(
         state["prepared_legal_action_ids"] = legal
 
         yield {
-            "schema_version": 2,
+            "schema_version": 3,
             "battle_id": metadata.battle_id,
             "battle_date": metadata.battle_date.isoformat() if metadata.battle_date else None,
             "rating": metadata.rating,
             "outcome": metadata.outcome,
             "source": source_name,
             "turn_index": turn_index,
+            "battle_decision_count": max(len(states) - 1, 1),
             "split": split,
             "state": state,
+            "player_roster": _roster_snapshot(
+                player_roster,
+                player_order,
+                state.get("player_active_pokemon"),
+                "player",
+            ),
+            "opponent_roster": _roster_snapshot(
+                opponent_roster,
+                opponent_order,
+                state.get("opponent_active_pokemon"),
+                "opponent",
+            ),
+            "history_events": _history_snapshot(history_events),
             "action_id": action_id,
             "target": action_label(action_id),
             "legal_action_ids": legal,
@@ -567,7 +769,7 @@ def prepare_dataset(
         raise AssertionError(f"Battle-level split leakage detected for {len(overlap)} battles")
 
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "inputs": [str(path) for path in inputs],
         "output_dir": str(output_dir),
         "battle_format": battle_format,

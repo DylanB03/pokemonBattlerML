@@ -14,6 +14,9 @@ from pokemon_battler.actions import (
     sorted_moves,
     sorted_switches,
 )
+from pokemon_battler.poke_env_compat import install_safe_poke_env_shutdown
+
+install_safe_poke_env_shutdown()
 
 MECHANICS_SCHEMA = "mechanics-v1"
 BOOST_STATS = ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion")

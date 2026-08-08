@@ -12,6 +12,10 @@ from pokemon_battler.evaluate import build_parser as build_evaluate_parser
 from pokemon_battler.evaluate import evaluate
 from pokemon_battler.mechanics_v2 import MECHANICS_SCHEMA
 from pokemon_battler.mechanics_cache import build_feature_cache, default_cache_path
+from pokemon_battler.interaction_cache import (
+    build_interaction_cache,
+    default_interaction_cache_path,
+)
 from pokemon_battler.train import build_parser as build_train_parser
 from pokemon_battler.train import train
 
@@ -86,6 +90,24 @@ def _train_arguments(args: argparse.Namespace) -> argparse.Namespace:
         str(args.num_workers),
         "--seed",
         str(args.seed),
+        "--qwen-mode",
+        args.qwen_mode,
+        "--interaction-d-model",
+        str(args.interaction_d_model),
+        "--interaction-attention-heads",
+        str(args.interaction_attention_heads),
+        "--interaction-layers",
+        str(args.interaction_layers),
+        "--interaction-feedforward-size",
+        str(args.interaction_feedforward_size),
+        "--interaction-dropout",
+        str(args.interaction_dropout),
+        "--interaction-identity-embedding-size",
+        str(args.interaction_identity_embedding_size),
+        "--family-aux-weight",
+        str(args.family_aux_weight),
+        "--value-loss-weight",
+        str(args.value_loss_weight),
     ]
     if args.load_in_4bit:
         values.append("--load-in-4bit")
@@ -105,6 +127,21 @@ def _train_arguments(args: argparse.Namespace) -> argparse.Namespace:
                 str(
                     args.validation_mechanics_cache
                     or default_cache_path(args.validation_file, MECHANICS_SCHEMA)
+                ),
+            ]
+        )
+    if args.objective == "interaction-head":
+        values.extend(
+            [
+                "--train-interaction-cache",
+                str(
+                    args.train_interaction_cache
+                    or default_interaction_cache_path(args.train_file)
+                ),
+                "--validation-interaction-cache",
+                str(
+                    args.validation_interaction_cache
+                    or default_interaction_cache_path(args.validation_file)
                 ),
             ]
         )
@@ -159,6 +196,16 @@ def _evaluate_checkpoint(
                 ),
             ]
         )
+    if args.objective == "interaction-head":
+        values.extend(
+            [
+                "--interaction-cache",
+                str(
+                    args.validation_interaction_cache
+                    or default_interaction_cache_path(args.validation_file)
+                ),
+            ]
+        )
     report = evaluate(build_evaluate_parser().parse_args(values))
     _release_model_memory()
     return report
@@ -175,6 +222,7 @@ def _summary_metrics(report: dict[str, Any]) -> dict[str, Any]:
         "accuracy_by_target_family": report["accuracy_by_target_family"],
         "prediction_counts": report["prediction_counts"],
         "target_counts": report["target_counts"],
+        "value": report.get("value"),
     }
 
 
@@ -211,6 +259,29 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                 overwrite=args.rebuild_mechanics_cache,
                 progress_every=args.mechanics_cache_progress_every,
                 schema=MECHANICS_SCHEMA,
+            )
+
+    if args.objective == "interaction-head":
+        for data_file, configured_cache in (
+            (args.train_file, args.train_interaction_cache),
+            (args.validation_file, args.validation_interaction_cache),
+        ):
+            cache_path = configured_cache or default_interaction_cache_path(data_file)
+            print(
+                json.dumps(
+                    {
+                        "phase": "prepare-interaction-cache",
+                        "data_file": str(data_file),
+                        "cache_dir": str(cache_path),
+                    }
+                ),
+                flush=True,
+            )
+            build_interaction_cache(
+                data_file,
+                cache_path,
+                overwrite=args.rebuild_interaction_cache,
+                progress_every=args.interaction_cache_progress_every,
             )
 
     print(
@@ -274,7 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B")
     parser.add_argument(
         "--objective",
-        choices=("mechanics-head", "candidate-head", "policy-head"),
+        choices=("interaction-head", "mechanics-head", "candidate-head", "policy-head"),
         default="mechanics-head",
     )
     parser.add_argument(
@@ -325,6 +396,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-mechanics-cache", type=Path)
     parser.add_argument("--rebuild-mechanics-cache", action="store_true")
     parser.add_argument("--mechanics-cache-progress-every", type=int, default=10_000)
+    parser.add_argument("--train-interaction-cache", type=Path)
+    parser.add_argument("--validation-interaction-cache", type=Path)
+    parser.add_argument("--rebuild-interaction-cache", action="store_true")
+    parser.add_argument("--interaction-cache-progress-every", type=int, default=10_000)
+    parser.add_argument("--interaction-d-model", type=int, default=384)
+    parser.add_argument("--interaction-attention-heads", type=int, default=8)
+    parser.add_argument("--interaction-layers", type=int, default=4)
+    parser.add_argument("--interaction-feedforward-size", type=int, default=1536)
+    parser.add_argument("--interaction-dropout", type=float, default=0.1)
+    parser.add_argument("--interaction-identity-embedding-size", type=int, default=16)
+    parser.add_argument("--qwen-mode", choices=("lora", "frozen", "none"), default="lora")
+    parser.add_argument("--family-aux-weight", type=float, default=0.25)
+    parser.add_argument("--value-loss-weight", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16"), default="auto")
     parser.add_argument(

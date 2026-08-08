@@ -420,6 +420,116 @@ class MechanicsCollator:
         return batch
 
 
+class InteractionCollator:
+    """Build Qwen state inputs plus cached structured interaction tensors."""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        *,
+        max_length: int = 4096,
+        truncation: str = "error",
+        prompt_format: str = "mechanics-v2",
+    ) -> None:
+        if truncation not in {"error", "left"}:
+            raise ValueError("truncation must be 'error' or 'left'")
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.truncation = truncation
+        self.prompt_format = prompt_format
+        self.pad_token_id = tokenizer.pad_token_id
+        if self.pad_token_id is None:
+            self.pad_token_id = tokenizer.eos_token_id
+        if self.pad_token_id is None:
+            raise ValueError("Tokenizer needs a pad token or EOS token")
+
+    def _encode(self, row: dict[str, Any]) -> dict[str, Any]:
+        from pokemon_battler.interaction_features import (
+            build_interaction_features,
+            validate_interaction_row,
+        )
+
+        validate_interaction_row(row)
+        state = row["state"]
+        prompt_ids = self.tokenizer.encode(
+            render_prompt(state, self.prompt_format),
+            add_special_tokens=True,
+        )
+        if len(prompt_ids) > self.max_length:
+            if self.truncation == "error":
+                raise ValueError(
+                    f"Prompt has {len(prompt_ids)} tokens and exceeds "
+                    f"max_length={self.max_length}. Increase --max-length or explicitly "
+                    "select --truncation left."
+                )
+            prompt_ids = prompt_ids[-self.max_length :]
+        features = row.get("_interaction_features")
+        if features is None:
+            features = build_interaction_features(row)
+        action_id = int(row["action_id"])
+        outcome = str(row.get("outcome") or "").upper()
+        battle_decisions = max(int(row.get("battle_decision_count", 1)), 1)
+        return {
+            "prompt_ids": prompt_ids,
+            "action_id": action_id,
+            "family_id": 0 if action_id < 4 else 1 if action_id < 9 else 2,
+            "value_target": 1.0 if outcome == "WIN" else 0.0 if outcome == "LOSS" else -1.0,
+            # Keep the auxiliary loss near unit scale while preventing long
+            # battles from contributing one full value target per decision.
+            "value_weight": min(max(32.0 / battle_decisions, 0.25), 4.0),
+            "features": features,
+        }
+
+    def __call__(self, rows: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        encoded = [self._encode(row) for row in rows]
+        max_batch_length = max(len(item["prompt_ids"]) for item in encoded)
+        input_rows: list[list[int]] = []
+        attention_rows: list[list[int]] = []
+        for item in encoded:
+            prompt_ids = item["prompt_ids"]
+            padding = max_batch_length - len(prompt_ids)
+            input_rows.append(prompt_ids + [self.pad_token_id] * padding)
+            attention_rows.append([1] * len(prompt_ids) + [0] * padding)
+
+        def stack_feature(name: str, dtype: torch.dtype) -> torch.Tensor:
+            return torch.stack(
+                [torch.tensor(item["features"][name], dtype=dtype) for item in encoded]
+            )
+
+        return {
+            "input_ids": torch.tensor(input_rows, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_rows, dtype=torch.long),
+            "action_ids": torch.tensor(
+                [item["action_id"] for item in encoded], dtype=torch.long
+            ),
+            "action_family_ids": torch.tensor(
+                [item["family_id"] for item in encoded], dtype=torch.long
+            ),
+            "value_targets": torch.tensor(
+                [item["value_target"] for item in encoded], dtype=torch.float32
+            ),
+            "value_weights": torch.tensor(
+                [item["value_weight"] for item in encoded], dtype=torch.float32
+            ),
+            "interaction_global_numeric": stack_feature("global_numeric", torch.float32),
+            "interaction_global_ids": stack_feature("global_ids", torch.long),
+            "interaction_pokemon_numeric": stack_feature("pokemon_numeric", torch.float32),
+            "interaction_pokemon_ids": stack_feature("pokemon_ids", torch.long),
+            "interaction_pokemon_mask": stack_feature("pokemon_mask", torch.bool),
+            "interaction_candidate_numeric": stack_feature(
+                "candidate_numeric", torch.float32
+            ),
+            "interaction_candidate_ids": stack_feature("candidate_ids", torch.long),
+            "legal_action_mask": stack_feature("candidate_mask", torch.bool),
+            "interaction_candidate_actor_slot": stack_feature(
+                "candidate_actor_slot", torch.long
+            ),
+            "interaction_history_numeric": stack_feature("history_numeric", torch.float32),
+            "interaction_history_ids": stack_feature("history_ids", torch.long),
+            "interaction_history_mask": stack_feature("history_mask", torch.bool),
+        }
+
+
 class CandidateCollator:
     """Build batches with one hidden-state marker position per legal candidate."""
 

@@ -29,6 +29,7 @@ pokemon-baseline = "pokemon_battler.baseline:main"
 pokemon-mechanics-cache = "pokemon_battler.mechanics_cache:main"
 pokemon-mechanics-baseline = "pokemon_battler.mechanics_baseline:main"
 pokemon-run = "pokemon_battler.experiment:main"
+pokemon-interaction-run = "pokemon_battler.interaction_experiment:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

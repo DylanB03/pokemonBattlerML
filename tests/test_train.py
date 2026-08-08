@@ -10,9 +10,14 @@ import torch
 
 from pokemon_battler.train import (
     _evaluate_model,
+    _save_checkpoint,
     _training_class_weights,
     learning_rate_multiplier,
     meaningful_validation_improvement,
+)
+from pokemon_battler.interaction_modeling import (
+    INTERACTION_HEAD_FILENAME,
+    InteractionPolicyHead,
 )
 
 
@@ -28,6 +33,20 @@ class HiddenStateModel(torch.nn.Module):
         del attention_mask, output_hidden_states, use_cache, logits_to_keep
         hidden = torch.nn.functional.one_hot(input_ids % 4, num_classes=4).float()
         return SimpleNamespace(hidden_states=(hidden,))
+
+
+class SaveTracker:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def save_pretrained(self, output_dir: Path, **kwargs: object) -> None:
+        del output_dir, kwargs
+        self.calls += 1
+
+
+class TokenizerSaveTracker:
+    def save_pretrained(self, output_dir: Path) -> None:
+        (output_dir / "tokenizer.saved").write_text("yes", encoding="utf-8")
 
 
 class TrainTests(unittest.TestCase):
@@ -133,6 +152,31 @@ class TrainTests(unittest.TestCase):
                 higher_is_better=True,
             )
         )
+
+    def test_qwen_none_checkpoint_saves_head_without_copying_frozen_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "checkpoint"
+            model = SaveTracker()
+            head = InteractionPolicyHead(
+                16,
+                d_model=32,
+                attention_heads=4,
+                layers=1,
+                feedforward_size=64,
+                dropout=0.0,
+                qwen_mode="none",
+            )
+            _save_checkpoint(
+                model,
+                TokenizerSaveTracker(),
+                output_dir,
+                {},
+                head,
+                "interaction-head",
+            )
+            self.assertEqual(model.calls, 0)
+            self.assertTrue((output_dir / INTERACTION_HEAD_FILENAME).is_file())
+            self.assertTrue((output_dir / "training_config.json").is_file())
 
 
 if __name__ == "__main__":

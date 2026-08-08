@@ -86,6 +86,9 @@ Implemented:
 - Deterministic offline ranking, family, entropy, and action-agreement evaluation.
 - One-command cache preparation, plateau-aware training, best/final evaluation,
   and reporting.
+- Schema-3 trajectory preparation with stable rosters and backward-only history.
+- A structured interaction transformer with hierarchical action and auxiliary
+  value heads, plus an end-to-end raw-archive-to-report runner.
 
 Not yet implemented:
 
@@ -93,14 +96,16 @@ Not yet implemented:
 - A complete Pokémon Showdown battle client.
 - Per-turn decision traces covering an entire battle.
 - A replay-review interface.
-- A state-value or action-value model.
+- A calibrated state-value or action-value model suitable for search or
+  counterfactual use. The current outcome head is an uncalibrated auxiliary.
 - Counterfactual simulator analysis and regret.
 - Grounded natural-language coaching.
 
 ## Phase 0 — Validate the behavior-cloned policy
 
-Status: in progress. The first mechanics-v2 run is complete; live battle
-evaluation and the next policy architecture are not.
+Status: in progress. The first mechanics-v2 run and the next policy
+architecture are implemented; the interaction-policy GPU run and live battle
+evaluation are not complete.
 
 Deliverables:
 
@@ -110,16 +115,16 @@ Deliverables:
   reference, not as a completed epoch or live-play result.
 - Preserve the completed mechanics-v2 checkpoint: 42.86% exact action agreement,
   64.78% top-2, and 78.78% top-3 on 5,000 validation rows.
-- Regenerate the development split with preparation schema 2. The dataset used
+- Regenerate the development split with preparation schema 3. The dataset used
   by the completed run lacks recent history, accumulated opponent reveals, and
   legal-mask-quality metadata now supported by the preparer.
-- Repeat the 128-row memorization gate for the final mechanics-v2 representation.
+- Run the automated 128-row memorization gate for the interaction representation.
 - Compare the hybrid against the mechanics-only ablation to measure the value of
   Qwen's state representation.
-- Replace independent per-candidate MLP scoring with a small team/candidate
-  interaction encoder and an auxiliary hierarchical action-family objective.
-- Add a state-value objective before attempting outcome-weighted imitation or
-  offline reinforcement learning.
+- Measure the implemented team/candidate interaction encoder and hierarchical
+  action-family objective against mechanics-v2.
+- Measure the implemented auxiliary state-value head before considering
+  outcome-weighted imitation or offline reinforcement learning.
 - Report held-out action agreement, action-type accuracy, replay-candidate
   constraint coverage, and top-action margins. Measure true legality only under
   the live simulator mask.
@@ -134,8 +139,8 @@ Exit criteria:
 
 The rationale and recommended experiment order are documented in
 [What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
-The proposed implementation contract is
-[Proposed interaction policy v3](docs/interaction-policy-v3.md).
+The implementation contract is
+[Interaction policy v3](docs/interaction-policy-v3.md).
 
 ## Phase 1 — Expose model-preference percentages
 
