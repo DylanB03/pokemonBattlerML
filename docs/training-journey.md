@@ -259,7 +259,7 @@ With 286,059 examples and an effective batch of 32, the new run lasts about
 8,940 optimizer updates. It starts with one command:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --output-dir outputs/candidate-compact-1epoch
 ```
 
@@ -359,7 +359,7 @@ the language model a falsifiable role.
 The next hybrid run starts with one command:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --output-dir outputs/mechanics-v2-1epoch
 ```
 

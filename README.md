@@ -23,7 +23,7 @@ read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
 From the repository root, this is the complete command:
 
 ```bash
-.venv/bin/python -m pokemon_battler.interaction_experiment
+python -m pokemon_battler.interaction_experiment
 ```
 
 It performs the entire experiment in order:
@@ -84,7 +84,7 @@ command trains for up to one complete dataset pass, evaluates `best/` and `final
 the same 5,000 hash-sampled validation rows, and writes a comparison summary:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --output-dir outputs/mechanics-v2-1epoch
 ```
 
@@ -401,8 +401,7 @@ Run all commands from the repository root:
 
 ```bash
 cd /home/dylan/Gitrepos/allrepos/pokemonBattler
-source .venv/bin/activate
-uv pip install --python .venv/bin/python -e .
+uv pip install -e .
 python -m unittest discover -v
 ```
 

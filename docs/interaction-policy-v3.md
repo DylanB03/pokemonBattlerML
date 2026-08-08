@@ -430,7 +430,7 @@ separate later stages; they are not silently enabled by this schema.
 The integrated command is:
 
 ```bash
-.venv/bin/python -m pokemon_battler.interaction_experiment
+python -m pokemon_battler.interaction_experiment
 ```
 
 It prepares schema-3 data, builds caches, runs the 128-row gate, trains one

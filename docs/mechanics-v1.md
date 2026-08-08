@@ -101,7 +101,7 @@ changing its timestamp.
 The recommended hybrid run is:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --output-dir outputs/mechanics-v1-1epoch
 ```
 

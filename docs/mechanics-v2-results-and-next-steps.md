@@ -156,7 +156,7 @@ comparison.
 Once the gate passes, the controlled full command is:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --train-file data/gen9ou-dev-schema2/train.jsonl \
   --validation-file data/gen9ou-dev-schema2/validation.jsonl \
   --output-dir outputs/mechanics-v2-schema2-1epoch

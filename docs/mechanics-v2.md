@@ -142,7 +142,7 @@ instead of silently reading the wrong columns.
 The single-command experiment is:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --output-dir outputs/mechanics-v2-1epoch
 ```
 
