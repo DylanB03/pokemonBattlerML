@@ -18,6 +18,40 @@ analysis, regret estimation, and grounded coaching.
 For the development story behind the current objective and experiment design,
 read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
 
+## Run the trained policy in local Showdown battles
+
+The completed interaction checkpoint can now play full Generation 9 OU battles
+without another training run. From the repository root:
+
+```bash
+python -m pokemon_battler.live_eval --games 20 --opponent heuristic
+```
+
+On its first run, the command clones the official Pokémon Showdown server into
+the ignored `data/pokemon-showdown/` directory, installs its Node dependencies,
+starts it locally with `--no-security`, loads the existing `final/` checkpoint
+once, and plays the bundled team against a deterministic-preview
+`SimpleHeuristicsPlayer`. It requires `git`, Node.js, and `npm`. If a server is
+already listening on port 8000, the runner reuses it.
+
+Every decision uses Showdown's exact request mask while retaining the same
+alphabetical A0-A12 action identities used by the Metamon training data. Results
+are written under `reports/live/<timestamp>/`:
+
+```text
+summary.json       win rate, Wilson interval, fallbacks, and inference latency
+decisions.jsonl    state, legal mask, complete preference distribution, and order
+replays/           Pokémon Showdown replay logs
+showdown.log       managed local-server output
+```
+
+Use `--opponent random`, `--opponent max-power`, or `--opponent heuristic`.
+Both players use a fixed slot-one lead because team preview was not part of this
+policy's training target. The bundled team is a smoke-test fixture, not a broad
+team-pool evaluation. See [Local Showdown evaluation](docs/live-showdown-evaluation.md)
+for the state conversion, failure handling, interpretation, and additional CLI
+options.
+
 ## Run the new interaction policy end to end
 
 From the repository root, this is the complete command:

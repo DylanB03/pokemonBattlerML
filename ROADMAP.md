@@ -89,12 +89,16 @@ Implemented:
 - Schema-3 trajectory preparation with stable rosters and backward-only history.
 - A structured interaction transformer with hierarchical action and auxiliary
   value heads, plus an end-to-end raw-archive-to-report runner.
+- A local `poke-env` Showdown player that applies the live request mask, maps the
+  interaction policy's A0-A12 output back to battle orders, and records complete
+  decision traces and win-rate summaries.
 
 Not yet implemented:
 
-- Preference percentages or probability calibration.
-- A complete Pokémon Showdown battle client.
-- Per-turn decision traces covering an entire battle.
+- Probability calibration and a user-facing preference display. Live traces
+  already record normalized legal-action preferences.
+- Public-server account and ladder mode. The local client isolates this to
+  connection configuration and matchmaking after local validation.
 - A replay-review interface.
 - A calibrated state-value or action-value model suitable for search or
   counterfactual use. The current outcome head is an uncalibrated auxiliary.
@@ -103,9 +107,10 @@ Not yet implemented:
 
 ## Phase 0 — Validate the behavior-cloned policy
 
-Status: in progress. The first mechanics-v2 run and the next policy
-architecture are implemented; the interaction-policy GPU run and live battle
-evaluation are not complete.
+Status: in progress. Mechanics-v2 and interaction-policy training are complete.
+The final interaction checkpoint reached 43.92% exact agreement on the fixed
+5,000-row validation sample. The local live-battle harness is implemented; its
+fixed-opponent battle results are the remaining validation step.
 
 Deliverables:
 

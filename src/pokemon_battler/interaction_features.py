@@ -460,7 +460,8 @@ def candidate_actor_slots(row: dict[str, Any]) -> list[int]:
     return slots
 
 
-def validate_interaction_row(row: dict[str, Any]) -> None:
+def validate_interaction_observation(row: dict[str, Any]) -> None:
+    """Validate the decision-time fields shared by training and live inference."""
     if int(row.get("schema_version", -1)) != PREPARED_SCHEMA_VERSION:
         raise ValueError(
             f"Interaction policy requires prepared schema {PREPARED_SCHEMA_VERSION}; "
@@ -473,22 +474,28 @@ def validate_interaction_row(row: dict[str, Any]) -> None:
         "history_events",
         "legal_action_ids",
         "legal_mask_quality",
-        "action_id",
     }
     missing = sorted(required.difference(row))
     if missing:
         raise ValueError(f"Schema-3 row is missing: {', '.join(missing)}")
     legal = [int(value) for value in row["legal_action_ids"]]
-    if int(row["action_id"]) not in legal:
-        raise ValueError("Interaction row target is absent from legal_action_ids")
     prepared = legal_action_ids(row["state"])
     if legal != prepared:
         raise ValueError("Interaction row legal_action_ids disagree with its state")
     candidate_actor_slots(row)
 
 
-def build_interaction_features(row: dict[str, Any]) -> dict[str, Any]:
-    validate_interaction_row(row)
+def validate_interaction_row(row: dict[str, Any]) -> None:
+    """Validate a labelled interaction row used for training or offline evaluation."""
+    validate_interaction_observation(row)
+    if "action_id" not in row:
+        raise ValueError("Schema-3 row is missing: action_id")
+    legal = [int(value) for value in row["legal_action_ids"]]
+    if int(row["action_id"]) not in legal:
+        raise ValueError("Interaction row target is absent from legal_action_ids")
+
+
+def _build_interaction_features(row: dict[str, Any]) -> dict[str, Any]:
     global_numeric, global_ids = global_features(row)
     pokemon_numeric, pokemon_ids, pokemon_mask = pokemon_features(row)
     history_numeric, history_ids, history_mask = history_features(row)
@@ -508,6 +515,17 @@ def build_interaction_features(row: dict[str, Any]) -> dict[str, Any]:
         "history_ids": history_ids,
         "history_mask": history_mask,
     }
+
+
+def build_interaction_observation_features(row: dict[str, Any]) -> dict[str, Any]:
+    """Build policy inputs for an unlabelled live decision observation."""
+    validate_interaction_observation(row)
+    return _build_interaction_features(row)
+
+
+def build_interaction_features(row: dict[str, Any]) -> dict[str, Any]:
+    validate_interaction_row(row)
+    return _build_interaction_features(row)
 
 
 assert GLOBAL_NUMERIC_COUNT == 30

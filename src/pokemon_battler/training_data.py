@@ -443,13 +443,23 @@ class InteractionCollator:
         if self.pad_token_id is None:
             raise ValueError("Tokenizer needs a pad token or EOS token")
 
-    def _encode(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _encode_observation(
+        self,
+        row: dict[str, Any],
+        *,
+        require_target: bool,
+    ) -> dict[str, Any]:
         from pokemon_battler.interaction_features import (
+            build_interaction_observation_features,
             build_interaction_features,
+            validate_interaction_observation,
             validate_interaction_row,
         )
 
-        validate_interaction_row(row)
+        if require_target:
+            validate_interaction_row(row)
+        else:
+            validate_interaction_observation(row)
         state = row["state"]
         prompt_ids = self.tokenizer.encode(
             render_prompt(state, self.prompt_format),
@@ -465,23 +475,34 @@ class InteractionCollator:
             prompt_ids = prompt_ids[-self.max_length :]
         features = row.get("_interaction_features")
         if features is None:
-            features = build_interaction_features(row)
+            features = (
+                build_interaction_features(row)
+                if require_target
+                else build_interaction_observation_features(row)
+            )
+        return {
+            "prompt_ids": prompt_ids,
+            "features": features,
+        }
+
+    def _encode(self, row: dict[str, Any]) -> dict[str, Any]:
+        encoded = self._encode_observation(row, require_target=True)
         action_id = int(row["action_id"])
         outcome = str(row.get("outcome") or "").upper()
         battle_decisions = max(int(row.get("battle_decision_count", 1)), 1)
-        return {
-            "prompt_ids": prompt_ids,
+        return encoded | {
             "action_id": action_id,
             "family_id": 0 if action_id < 4 else 1 if action_id < 9 else 2,
             "value_target": 1.0 if outcome == "WIN" else 0.0 if outcome == "LOSS" else -1.0,
             # Keep the auxiliary loss near unit scale while preventing long
             # battles from contributing one full value target per decision.
             "value_weight": min(max(32.0 / battle_decisions, 0.25), 4.0),
-            "features": features,
         }
 
-    def __call__(self, rows: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        encoded = [self._encode(row) for row in rows]
+    def _collate_observations(
+        self,
+        encoded: Sequence[dict[str, Any]],
+    ) -> dict[str, torch.Tensor]:
         max_batch_length = max(len(item["prompt_ids"]) for item in encoded)
         input_rows: list[list[int]] = []
         attention_rows: list[list[int]] = []
@@ -499,18 +520,6 @@ class InteractionCollator:
         return {
             "input_ids": torch.tensor(input_rows, dtype=torch.long),
             "attention_mask": torch.tensor(attention_rows, dtype=torch.long),
-            "action_ids": torch.tensor(
-                [item["action_id"] for item in encoded], dtype=torch.long
-            ),
-            "action_family_ids": torch.tensor(
-                [item["family_id"] for item in encoded], dtype=torch.long
-            ),
-            "value_targets": torch.tensor(
-                [item["value_target"] for item in encoded], dtype=torch.float32
-            ),
-            "value_weights": torch.tensor(
-                [item["value_weight"] for item in encoded], dtype=torch.float32
-            ),
             "interaction_global_numeric": stack_feature("global_numeric", torch.float32),
             "interaction_global_ids": stack_feature("global_ids", torch.long),
             "interaction_pokemon_numeric": stack_feature("pokemon_numeric", torch.float32),
@@ -528,6 +537,38 @@ class InteractionCollator:
             "interaction_history_ids": stack_feature("history_ids", torch.long),
             "interaction_history_mask": stack_feature("history_mask", torch.bool),
         }
+
+    def __call__(self, rows: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        encoded = [self._encode(row) for row in rows]
+        batch = self._collate_observations(encoded)
+        batch.update(
+            {
+                "action_ids": torch.tensor(
+                    [item["action_id"] for item in encoded], dtype=torch.long
+                ),
+                "action_family_ids": torch.tensor(
+                    [item["family_id"] for item in encoded], dtype=torch.long
+                ),
+                "value_targets": torch.tensor(
+                    [item["value_target"] for item in encoded], dtype=torch.float32
+                ),
+                "value_weights": torch.tensor(
+                    [item["value_weight"] for item in encoded], dtype=torch.float32
+                ),
+            }
+        )
+        return batch
+
+
+class InteractionInferenceCollator(InteractionCollator):
+    """Build interaction-policy inputs without training targets or outcome labels."""
+
+    def __call__(self, rows: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        encoded = [
+            self._encode_observation(row, require_target=False)
+            for row in rows
+        ]
+        return self._collate_observations(encoded)
 
 
 class CandidateCollator:

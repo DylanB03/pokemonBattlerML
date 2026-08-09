@@ -2,7 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+from concurrent.futures import Future
 from typing import Any
+
+
+async def close_poke_env_clients(*clients: Any) -> None:
+    """Close client sockets and wait for poke-env's listener tasks to finish."""
+    if not clients:
+        return
+
+    results = await asyncio.gather(
+        *(client.stop_listening() for client in clients),
+        return_exceptions=True,
+    )
+    errors = [result for result in results if isinstance(result, BaseException)]
+    if errors:
+        raise RuntimeError(
+            f"Failed to close {len(errors)} poke-env client(s)"
+        ) from errors[0]
+
+    listener_futures: list[Future[Any]] = [
+        client._listening_coroutine
+        for client in clients
+        if hasattr(client, "_listening_coroutine")
+    ]
+    if listener_futures:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(asyncio.wrap_future(future) for future in listener_futures),
+                return_exceptions=True,
+            ),
+            timeout=5.0,
+        )
 
 
 def install_safe_poke_env_shutdown() -> None:
@@ -22,13 +53,23 @@ def install_safe_poke_env_shutdown() -> None:
         if loop.is_closed():
             return
 
-        def cancel_and_stop() -> None:
-            for task in asyncio.all_tasks(loop):
+        async def cancel_pending_tasks() -> None:
+            current = asyncio.current_task()
+            tasks = [task for task in asyncio.all_tasks(loop) if task is not current]
+            for task in tasks:
                 task.cancel()
-            loop.stop()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         if loop.is_running():
-            loop.call_soon_threadsafe(cancel_and_stop)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    cancel_pending_tasks(), loop
+                ).result(timeout=2.0)
+            except Exception:
+                # Exit must not hang because an upstream task stopped responding.
+                pass
+            loop.call_soon_threadsafe(loop.stop)
             # Never hold process shutdown forever if an upstream event loop is
             # already unhealthy. Its thread is daemonized by poke-env.
             thread.join(timeout=2.0)
