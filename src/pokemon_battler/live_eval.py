@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from poke_env import (
+    AccountConfiguration,
     LocalhostServerConfiguration,
     MaxBasePowerPlayer,
     RandomPlayer,
@@ -17,6 +18,10 @@ from poke_env import (
     SimpleHeuristicsPlayer,
 )
 
+from pokemon_battler.external_opponents import (
+    EXTERNAL_OPPONENTS,
+    ExternalOpponentProcess,
+)
 from pokemon_battler.live_policy import (
     DecisionTraceWriter,
     DeterministicPreviewMixin,
@@ -53,6 +58,8 @@ OPPONENTS = {
     "max-power": DeterministicMaxBasePowerPlayer,
     "heuristic": DeterministicSimpleHeuristicsPlayer,
 }
+ALL_OPPONENTS = (*OPPONENTS, *EXTERNAL_OPPONENTS)
+PLAYER_USERNAME = "PBPolicy"
 
 
 def _read_team(path: Path) -> str:
@@ -104,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model")
     parser.add_argument("--team-file", type=Path, default=DEFAULT_TEAM)
     parser.add_argument("--opponent-team-file", type=Path)
-    parser.add_argument("--opponent", choices=tuple(OPPONENTS), default="heuristic")
+    parser.add_argument("--opponent", choices=ALL_OPPONENTS, default="heuristic")
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--battle-format", default="gen9ou")
     parser.add_argument("--showdown-dir", type=Path, default=Path("data/pokemon-showdown"))
@@ -112,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-bootstrap-server", action="store_true")
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--server-startup-timeout", type=float, default=60.0)
+    parser.add_argument("--opponents-dir", type=Path, default=Path("data/opponents"))
+    parser.add_argument("--no-bootstrap-opponents", action="store_true")
+    parser.add_argument("--opponent-startup-timeout", type=float, default=90.0)
+    parser.add_argument("--foul-play-search-time-ms", type=int, default=100)
+    parser.add_argument("--foul-play-parallelism", type=int, default=1)
+    parser.add_argument("--foul-play-search-threads", type=int, default=1)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--prompt-format")
@@ -137,7 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run_battles(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
+async def _run_battles(
+    args: argparse.Namespace,
+    output_dir: Path,
+    *,
+    external_opponent: ExternalOpponentProcess | None = None,
+) -> dict[str, Any]:
     team = _read_team(args.team_file)
     opponent_team = _read_team(args.opponent_team_file or args.team_file)
     runtime = InteractionPolicyRuntime(
@@ -157,6 +175,7 @@ async def _run_battles(args: argparse.Namespace, output_dir: Path) -> dict[str, 
     trace_writer = DecisionTraceWriter(output_dir / "decisions.jsonl")
     player = InteractionPlayer(
         runtime,
+        account_configuration=AccountConfiguration(PLAYER_USERNAME, None),
         trace_writer=trace_writer,
         fail_fast=args.fail_fast,
         battle_format=args.battle_format,
@@ -165,16 +184,37 @@ async def _run_battles(args: argparse.Namespace, output_dir: Path) -> dict[str, 
         server_configuration=server_configuration,
         team=team,
     )
-    opponent_class = OPPONENTS[args.opponent]
-    opponent = opponent_class(
-        battle_format=args.battle_format,
-        max_concurrent_battles=1,
-        save_replays=False,
-        server_configuration=server_configuration,
-        team=opponent_team,
-    )
+    opponent = None
+    if external_opponent is None:
+        opponent_class = OPPONENTS[args.opponent]
+        opponent = opponent_class(
+            battle_format=args.battle_format,
+            max_concurrent_battles=1,
+            save_replays=False,
+            server_configuration=server_configuration,
+            team=opponent_team,
+        )
     try:
-        await player.battle_against(opponent, n_battles=args.games)
+        if external_opponent is None:
+            assert opponent is not None
+            await player.battle_against(opponent, n_battles=args.games)
+        else:
+            if external_opponent.challenges_player:
+                deadline = asyncio.get_running_loop().time() + 10.0
+                while not player.ps_client.logged_in.is_set():
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError(
+                            f"{PLAYER_USERNAME} did not log in within 10 seconds"
+                        )
+                    await asyncio.sleep(0.05)
+                external_opponent.start_challenges()
+                await player.accept_challenges(
+                    external_opponent.username,
+                    args.games,
+                )
+            else:
+                await player.send_challenges(external_opponent.username, args.games)
+            external_opponent.ensure_success()
 
         battles = list(player.battles.values())
         wins = sum(battle.won is True for battle in battles)
@@ -187,6 +227,9 @@ async def _run_battles(args: argparse.Namespace, output_dir: Path) -> dict[str, 
             "model": runtime.model_name,
             "battle_format": args.battle_format,
             "opponent": args.opponent,
+            "opponent_implementation": (
+                external_opponent.metadata() if external_opponent is not None else None
+            ),
             "team_file": str(args.team_file),
             "opponent_team_file": str(args.opponent_team_file or args.team_file),
             "requested_games": args.games,
@@ -205,6 +248,11 @@ async def _run_battles(args: argparse.Namespace, output_dir: Path) -> dict[str, 
             ),
             "inference_latency_seconds": _latency_summary(player.inference_latencies),
             "lead_policy": "submitted-team-order-slot-1",
+            "opponent_lead_policy": (
+                external_opponent.metadata()["team_preview"]
+                if external_opponent is not None
+                else "submitted-team-order-slot-1"
+            ),
             "battles": [
                 {
                     "battle_id": battle.battle_tag,
@@ -217,7 +265,10 @@ async def _run_battles(args: argparse.Namespace, output_dir: Path) -> dict[str, 
             ],
         }
     finally:
-        await close_poke_env_clients(player.ps_client, opponent.ps_client)
+        clients = [player.ps_client]
+        if opponent is not None:
+            clients.append(opponent.ps_client)
+        await close_poke_env_clients(*clients)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -225,6 +276,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--games must be positive")
     if not 1 <= args.server_port <= 65535:
         raise ValueError("--server-port must be between 1 and 65535")
+    if args.opponent_startup_timeout <= 0:
+        raise ValueError("--opponent-startup-timeout must be positive")
+    if args.foul_play_search_time_ms <= 0:
+        raise ValueError("--foul-play-search-time-ms must be positive")
+    if args.foul_play_parallelism <= 0:
+        raise ValueError("--foul-play-parallelism must be positive")
+    if args.foul_play_search_threads <= 0:
+        raise ValueError("--foul-play-search-threads must be positive")
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = args.output_dir or Path("reports/live") / timestamp
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -241,6 +300,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         encoding="utf-8",
     )
     server_log = output_dir / "showdown.log"
+    external_opponent = (
+        ExternalOpponentProcess(
+            args.opponent,
+            opponents_dir=args.opponents_dir,
+            output_dir=output_dir,
+            team_file=args.opponent_team_file or args.team_file,
+            battle_format=args.battle_format,
+            games=args.games,
+            server_port=args.server_port,
+            bootstrap=not args.no_bootstrap_opponents,
+            startup_timeout=args.opponent_startup_timeout,
+            challenger=PLAYER_USERNAME,
+            foul_play_search_time_ms=args.foul_play_search_time_ms,
+            foul_play_parallelism=args.foul_play_parallelism,
+            foul_play_search_threads=args.foul_play_search_threads,
+        )
+        if args.opponent in EXTERNAL_OPPONENTS
+        else None
+    )
+    if external_opponent is not None:
+        external_opponent.prepare()
+
     with LocalShowdownServer(
         args.showdown_dir,
         port=args.server_port,
@@ -249,7 +330,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         log_path=server_log,
         stop_on_exit=not args.keep_server,
     ):
-        summary = asyncio.run(_run_battles(args, output_dir))
+        if external_opponent is None:
+            summary = asyncio.run(_run_battles(args, output_dir))
+        else:
+            with external_opponent:
+                summary = asyncio.run(
+                    _run_battles(
+                        args,
+                        output_dir,
+                        external_opponent=external_opponent,
+                    )
+                )
     summary_path = output_dir / "summary.json"
     summary_path.write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",

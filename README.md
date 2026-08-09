@@ -45,12 +45,19 @@ replays/           Pokémon Showdown replay logs
 showdown.log       managed local-server output
 ```
 
-Use `--opponent random`, `--opponent max-power`, or `--opponent heuristic`.
-Both players use a fixed slot-one lead because team preview was not part of this
-policy's training target. The bundled team is a smoke-test fixture, not a broad
-team-pool evaluation. See [Local Showdown evaluation](docs/live-showdown-evaluation.md)
-for the state conversion, failure handling, interpretation, and additional CLI
-options.
+Use `--opponent random`, `--opponent max-power`, `--opponent heuristic`,
+`--opponent pokechamp-one-step`, `--opponent pokechamp-abyssal`, or
+`--opponent foul-play`. The three external policies run at pinned upstream
+revisions in isolated processes; no Ollama model is involved. The bundled team
+is a fixed-team fixture, not a broad team-pool evaluation. See
+[Local Showdown evaluation](docs/live-showdown-evaluation.md) for setup, state
+conversion, exact benchmark results, failure handling, and CLI controls.
+
+On the completed 20-game fixed-team samples, the checkpoint scored 20–0 against
+PokéChamp One-Step, 20–0 against PokéChamp Abyssal, and 4–16 against Foul Play's
+100 ms search. All 1,659 decisions completed without a fallback. These results
+show reliable full-battle execution and a clear gap to the search opponent; they
+are not a ladder or multi-team win-rate estimate.
 
 ## Run the new interaction policy end to end
 

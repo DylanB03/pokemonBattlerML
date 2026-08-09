@@ -25,9 +25,11 @@ python -m pokemon_battler.live_eval --games 1 --opponent random --fail-fast
 ```
 
 The first run bootstraps `data/pokemon-showdown/` with the official server and
-`npm install`. That directory is covered by the repository's existing `data/`
-ignore rule. Later runs reuse the installation. The runner also reuses a server
-that is already listening on its configured port.
+`npm install`. External-opponent runs also clone their pinned source revisions
+under `data/opponents/`; Foul Play gets a separate Python environment there.
+Those directories are covered by the repository's existing `data/` ignore rule.
+Later runs reuse both installations. The runner also reuses a server that is
+already listening on its configured port.
 
 Prerequisites:
 
@@ -35,6 +37,7 @@ Prerequisites:
 - the cached Qwen base model used during training;
 - the project's Python dependencies;
 - Git, Node.js, and npm for the first local-server setup;
+- `uv` for Foul Play's isolated `poke-engine` installation;
 - CUDA for the checkpoint's default 4-bit loading mode.
 
 ## What happens at each decision
@@ -75,7 +78,33 @@ Available local opponents are:
 random       uniform random valid orders
 max-power    highest available base-power move
 heuristic    poke-env's switching, setup, hazard, damage, and Tera heuristic
+pokechamp-one-step  PokéChamp's immediate turns-to-faint baseline
+pokechamp-abyssal  PokéChamp's switching, setup, hazard, and damage heuristic
+foul-play     Foul Play's sampled-state MCTS engine
 ```
+
+The external integrations execute the published policies as separate processes;
+they do not reimplement their choice rules in this repository. The exact source
+revisions are pinned and written into each summary:
+
+| Opponent | Source revision | License | Runtime behavior |
+| --- | --- | --- | --- |
+| PokéChamp One-Step | `0f84c460319ebe733f8c3028e58a2a5452c60d85` | MIT | Scores immediate attacks by estimated turns to faint; it does not proactively switch in the selected published path. |
+| PokéChamp Abyssal | `0f84c460319ebe733f8c3028e58a2a5452c60d85` | MIT | Uses hand-authored matchup, switching, setup, hazard, damage, and Tera rules. |
+| Foul Play | `25c976f05cbf2880eaa579afd6db1dcb2c3b57c6` | GPL-3.0 | Samples hidden sets and searches actions with its Rust-backed `poke-engine`; the default is 100 ms, one search worker, and one search thread. |
+
+Run twenty games against each with:
+
+```bash
+python -m pokemon_battler.live_eval --games 20 --opponent pokechamp-one-step
+python -m pokemon_battler.live_eval --games 20 --opponent pokechamp-abyssal
+python -m pokemon_battler.live_eval --games 20 --opponent foul-play
+```
+
+Use `--no-bootstrap-opponents` to require the pinned checkouts and isolated
+environment to exist already. Foul Play's compute can be changed with
+`--foul-play-search-time-ms`, `--foul-play-parallelism`, and
+`--foul-play-search-threads`; changing them creates a different benchmark.
 
 The default player and opponent both use
 `examples/teams/gen9ou-balance.txt`. Supply different Showdown export files
@@ -89,10 +118,37 @@ python -m pokemon_battler.live_eval \
   --opponent-team-file /path/to/opponent-team.txt
 ```
 
-Both sides retain the submitted team order and lead with slot one. This makes
-the initial comparison reproducible, but it also means the result includes a
-deliberately simple, untrained lead policy. A serious estimate should repeat the
+The trained player retains submitted team order and leads with slot one. The
+built-in opponents do the same. PokéChamp retains its published randomized team
+preview, while Foul Play retains its published search-based preview. Both fields
+are recorded in `summary.json`. A serious strength estimate should repeat the
 same frozen policy over a versioned pool of teams and leads.
+
+## Fixed-team benchmark on August 9, 2026
+
+The completed checkpoint was tested for 20 games against each new opponent with
+the same bundled Gen 9 OU team supplied to both sides. The model used a fixed
+slot-one lead. No run used Ollama, an API model, PPO, or additional training.
+
+| Opponent | Record | Win rate | Wilson 95% interval | Decisions | Fallbacks | Mean turns |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| PokéChamp One-Step | 20–0 | 100% | 83.9%–100% | 516 | 0 | 21.65 |
+| PokéChamp Abyssal | 20–0 | 100% | 83.9%–100% | 612 | 0 | 26.15 |
+| Foul Play, 100 ms | 4–16 | 20% | 8.1%–41.6% | 531 | 0 | 21.25 |
+
+The two perfect heuristic records show that the policy can execute complete,
+legal battles and exploit relatively local rules. They do not imply a 100%
+general win rate: One-Step is especially limited because its selected policy
+does not proactively switch. The Foul Play result is the stronger measurement.
+At 4–16, the trained policy won real games against a lookahead opponent but was
+clearly weaker under these conditions.
+
+Twenty games still produce wide intervals, and this is a single mirrored team
+rather than a team-pool or ladder estimate. Do not combine the three records
+into one 44–16 score: the opponents have radically different strength. The
+zero-fallback result across 1,659 measured decisions is separately useful—it
+shows that live state conversion, exact legal masking, and order submission
+survived the full benchmark.
 
 ## Outputs
 
@@ -100,6 +156,8 @@ Each run gets a new `reports/live/<timestamp>/` directory:
 
 - `run_config.json` records all command arguments;
 - `showdown.log` records local server output;
+- `opponent.log` records the external opponent when one is selected;
+- `opponent.ready` and, for Foul Play, `opponent.start` record lifecycle gates;
 - `decisions.jsonl` records every observation, exact legal mask, action
   distribution, selected order, auxiliary value estimate, latency, and
   fallback reason;

@@ -92,6 +92,11 @@ Implemented:
 - A local `poke-env` Showdown player that applies the live request mask, maps the
   interaction policy's A0-A12 output back to battle orders, and records complete
   decision traces and win-rate summaries.
+- Pinned, process-isolated integrations for PokéChamp One-Step, PokéChamp
+  Abyssal, and Foul Play, including automatic setup and multi-game lifecycle
+  handling.
+- A completed fixed-team live benchmark: 20–0 against each PokéChamp heuristic
+  and 4–16 against Foul Play at 100 ms, with zero fallbacks over 1,659 decisions.
 
 Not yet implemented:
 
@@ -107,10 +112,11 @@ Not yet implemented:
 
 ## Phase 0 — Validate the behavior-cloned policy
 
-Status: in progress. Mechanics-v2 and interaction-policy training are complete.
-The final interaction checkpoint reached 43.92% exact agreement on the fixed
-5,000-row validation sample. The local live-battle harness is implemented; its
-fixed-opponent battle results are the remaining validation step.
+Status: complete for the initial fixed-team gate. Mechanics-v2 and
+interaction-policy training are complete. The final interaction checkpoint
+reached 43.92% exact agreement on the fixed 5,000-row validation sample. The
+local harness completed 60 measured battles against three pinned external
+opponents with no live-policy fallback.
 
 Deliverables:
 
