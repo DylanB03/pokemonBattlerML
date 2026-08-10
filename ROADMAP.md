@@ -414,6 +414,13 @@ Keeping these modes separate makes the intended use clear and prevents a
 post-game training tool from quietly becoming live assistance in rated human
 play.
 
+The first public bot-mode runner is now implemented. It loads a dedicated
+account from an ignored `.env`, supports login-only verification and bounded
+challenge/ladder sessions, records replayable public trajectories, and can run
+PPO only between frozen batches. Public candidates are retained separately and
+must beat the frozen champion in local full-battle promotion games. Learned
+team preview and a broad multi-team promotion suite remain future work.
+
 ## Guiding principles
 
 - Never present policy likelihood as objective move quality.

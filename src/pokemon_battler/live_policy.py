@@ -222,6 +222,7 @@ class InteractionPlayer(Player):
         fail_fast: bool = False,
         sample_actions: bool = False,
         sampling_temperature: float = 1.0,
+        team_preview_policy: str = "first",
         decision_callback: Callable[[dict[str, Any]], None] | None = None,
         **player_kwargs: Any,
     ) -> None:
@@ -230,6 +231,9 @@ class InteractionPlayer(Player):
         self.fail_fast = fail_fast
         self.sample_actions = sample_actions
         self.sampling_temperature = sampling_temperature
+        if team_preview_policy not in {"first", "random"}:
+            raise ValueError("team_preview_policy must be 'first' or 'random'")
+        self.team_preview_policy = team_preview_policy
         self.decision_callback = decision_callback
         self.trackers: dict[str, LiveBattleTracker] = {}
         self.decision_count = 0
@@ -238,6 +242,8 @@ class InteractionPlayer(Player):
         super().__init__(**player_kwargs)
 
     def teampreview(self, battle: AbstractBattle) -> str:
+        if self.team_preview_policy == "random":
+            return self.random_teampreview(battle)
         return deterministic_teampreview(battle)
 
     def _write_decision(

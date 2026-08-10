@@ -267,8 +267,9 @@ def train_ppo_rollouts(
     local_files_only: bool = True,
     attn_implementation: str = "sdpa",
     seed: int = 42,
+    rollout_source: str = "local-self-play",
 ) -> dict[str, Any]:
-    """Run clipped PPO updates from completed local-Showdown trajectories."""
+    """Run clipped PPO updates from completed on-policy Showdown trajectories."""
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"PPO output directory is not empty: {output_dir}")
     if epochs <= 0 or batch_size <= 0 or gradient_accumulation_steps <= 0:
@@ -374,6 +375,7 @@ def train_ppo_rollouts(
         "schema": "qwen-ppo-update-v1",
         "source_checkpoint": str(checkpoint),
         "rollout_file": str(rollout_file),
+        "rollout_source": rollout_source,
         "rollout_decisions": len(dataset),
         "epochs": completed_epochs,
         "updates": updates,
@@ -394,7 +396,7 @@ def train_ppo_rollouts(
         "local_files_only": local_files_only,
         "dtype": dtype_name,
         "attn_implementation": attn_implementation,
-        "training_objective": "self-play-ppo",
+        "training_objective": f"{rollout_source}-ppo",
     }
     _save_checkpoint(model, tokenizer, output_dir, config, head, "interaction-head")
     (output_dir / "ppo_report.json").write_text(

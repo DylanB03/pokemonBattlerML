@@ -145,3 +145,20 @@ Showdown is used only for battle mechanics and observations. The default team
 fixture is expanded into six lead rotations; multiple genuine team files can
 be supplied for broader training. The implementation and limitations are in
 [docs/qwen-win-training.md](docs/qwen-win-training.md).
+
+## Public Showdown runner and online outcome batches
+
+Public account play is now wired through `pokemon_battler.public_play`. It
+loads the registered username and password from an ignored `.env`, provides a
+cheap login-only probe, accepts or sends bounded allowlisted challenges, and
+retains the public state/action/result stream as PPO-compatible JSONL. The
+default public checkpoint follows
+`outputs/qwen-win-pilot-1/selected_checkpoint.txt`.
+
+Optional `--learn` mode samples one frozen champion for a complete public
+batch, rejects incomplete or fallback-contaminated trajectories, trains a new
+checkpoint between games, and runs local candidate-versus-champion promotion.
+Rejected candidates stay on disk. Public team preview is randomized rather
+than permanently leading team slot one, but preview itself is not yet a learned
+action. Usage and commands are documented in
+[docs/public-showdown-learning.md](docs/public-showdown-learning.md).

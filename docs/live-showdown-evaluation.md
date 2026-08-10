@@ -190,5 +190,7 @@ python -m pokemon_battler.live_eval --keep-server
 ```
 
 The local player deliberately keeps connection details separate from policy
-logic. Public play later replaces the server configuration and calls ladder or
-challenge matchmaking; it does not require another model or state converter.
+logic. Public account authentication, bounded challenge/ladder matchmaking,
+trajectory capture, and opt-in between-batch PPO are implemented separately in
+`pokemon_battler.public_play`; they reuse this model and state converter. See
+[Public Showdown play and between-game learning](public-showdown-learning.md).

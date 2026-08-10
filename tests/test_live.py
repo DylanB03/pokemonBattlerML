@@ -8,6 +8,7 @@ from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
 from pokemon_battler.interaction_features import validate_interaction_observation
 from pokemon_battler.live_eval import DEFAULT_TEAM, build_parser
+from pokemon_battler.live_policy import InteractionPlayer
 from pokemon_battler.live_state import (
     LiveBattleTracker,
     battle_to_metamon_state,
@@ -132,6 +133,12 @@ class FakeTokenizer:
 
 
 class LivePolicyTests(unittest.TestCase):
+    def test_public_preview_policy_can_randomize_the_lead(self) -> None:
+        player = object.__new__(InteractionPlayer)
+        player.team_preview_policy = "random"
+        player.random_teampreview = lambda _battle: "/team 321"
+        self.assertEqual(player.teampreview(fake_battle()), "/team 321")
+
     def test_exact_mask_preserves_full_alphabetical_action_slots(self) -> None:
         battle = fake_battle()
         # Full order: calmmind, moonblast, psyshock, thunderbolt. Only Moonblast

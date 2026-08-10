@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=2.0.2",
     "peft>=0.14.0",
     "poke-env>=0.15.0,<0.16",
+    "python-dotenv>=1.0,<2",
     "safetensors>=0.4.5",
     "torch>=2.4.0",
     "transformers>=4.48.0,<6",
@@ -31,6 +32,7 @@ pokemon-mechanics-baseline = "pokemon_battler.mechanics_baseline:main"
 pokemon-run = "pokemon_battler.experiment:main"
 pokemon-interaction-run = "pokemon_battler.interaction_experiment:main"
 pokemon-live-eval = "pokemon_battler.live_eval:main"
+pokemon-public-play = "pokemon_battler.public_play:main"
 pokemon-win-train = "pokemon_battler.win_experiment:main"
 
 [tool.hatch.build.targets.wheel]

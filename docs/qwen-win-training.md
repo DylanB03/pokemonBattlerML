@@ -169,3 +169,9 @@ The system currently loads two 0.5B Qwen policies for a self-play match and one
 trainable policy for an update. Battles can run concurrently, but synchronous
 policy calls are not yet combined into one GPU batch. That batching optimization
 can improve throughput without changing the learning objective.
+
+Completed public games can now feed the same rollout schema through the
+separate `pokemon_battler.public_play` runner. Public PPO is opt-in, runs only
+between frozen game batches, uses smaller default learning rates, and retains
+the existing local champion-promotion gate. Account setup and commands are in
+[Public Showdown play and between-game learning](public-showdown-learning.md).

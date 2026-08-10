@@ -17,3 +17,7 @@ reports/
 *.pth
 
 .venv/
+
+.env
+.env.*
+!.env.example

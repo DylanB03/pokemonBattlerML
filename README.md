@@ -81,6 +81,36 @@ PokéChamp One-Step, 20–0 against PokéChamp Abyssal, and 4–16 against Foul 
 show reliable full-battle execution and a clear gap to the search opponent; they
 are not a ladder or multi-team win-rate estimate.
 
+## Play on public Showdown and optionally learn between batches
+
+Public play uses a normal registered Pokémon Showdown account loaded from an
+ignored `.env`; credentials never enter run artifacts. Start by copying
+`.env.example`, filling in `POKEMON_SHOWDOWN_USERNAME` and
+`POKEMON_SHOWDOWN_PASSWORD`, and verifying the login without loading Qwen:
+
+```bash
+cp .env.example .env
+python -m pokemon_battler.public_play --mode login
+```
+
+The recommended first human test accepts a fixed account's unrated challenges:
+
+```bash
+python -m pokemon_battler.public_play \
+  --mode accept \
+  --opponent YourTestingAccount \
+  --games 20
+```
+
+Add `--learn --batches 3 --games 32` only after the frozen run is clean. The
+policy stays frozen within every public batch. Between batches, PPO writes a
+new candidate, local candidate-versus-champion games decide promotion, and all
+accepted and rejected checkpoints remain separate. The default public policy
+comes from `outputs/qwen-win-pilot-1/selected_checkpoint.txt`, not the older
+interaction-policy default. See
+[Public Showdown play and between-game learning](docs/public-showdown-learning.md)
+for `.env` fields, commands, safeguards, artifacts, and ladder limitations.
+
 ## Run the new interaction policy end to end
 
 From the repository root, this is the complete command:
