@@ -363,8 +363,11 @@ Four layers add roughly 8-12 million trainable parameters including projections
 and embeddings. The exact count must be printed at startup. This is small next
 to Qwen2.5-0.5B and should fit the existing GPU budget with QLoRA.
 
-The output candidate tokens produce 13 candidate scores. The output global
-token produces three family logits and one optional state-value logit.
+The output candidate tokens produce 13 policy scores and, through a distinct
+MLP, 13 action-value logits. The output global token produces three family
+logits and one state-value logit. Policy scores and action values are separate:
+the former describes Qwen's action distribution, while the latter estimates
+the logged or sampled action's eventual outcome.
 
 ## Action hierarchy
 
@@ -422,8 +425,11 @@ ROC AUC, reliability bins, and comparison with a constant win-rate baseline are
 follow-up diagnostics. Its output is not called win probability until
 calibration has been measured.
 
-The value head is auxiliary in the first policy run. Offline RL and search are
-separate later stages; they are not silently enabled by this schema.
+The value head is auxiliary in the first policy run. The later direct
+win-training pipeline adds a per-candidate action-value head and fits both from
+terminal results. Checkpoints created before that addition remain loadable; the
+missing action-value MLP starts from normal initialization and is trained by the
+offline outcome phase. Search is not part of the Qwen win-training path.
 
 ## Implemented run and controlled follow-ups
 

@@ -5,11 +5,11 @@ Generation 9 OU Pokémon battles. It converts Metamon replay trajectories into
 turn-level examples, trains `Qwen/Qwen2.5-0.5B` with QLoRA, and evaluates only
 actions that were legal in each recorded state.
 
-The first objective is supervised behavior cloning: predict a strong human
-player's recorded action from the visible battle state. Human-action agreement
-is useful, but it is not the final measure of battle strength because several
-actions can be reasonable. A later simulator evaluation must measure win rate
-against fixed opponents.
+The original objective is supervised behavior cloning: predict a strong human
+player's recorded action from the visible battle state. The win-training path
+now uses that checkpoint as a warm start, fits outcome-aware action and state
+values, and then optimizes Qwen directly through self-play PPO. Human-action
+agreement remains diagnostic; promotion is decided by complete-game results.
 
 See [ROADMAP.md](ROADMAP.md) for the planned progression from behavior cloning
 to model-preference displays, replay review, counterfactual win-probability
@@ -17,6 +17,28 @@ analysis, regret estimation, and grounded coaching.
 
 For the development story behind the current objective and experiment design,
 read [I Was Training a Pokémon Policy to Write A4](docs/training-journey.md).
+
+## Train Qwen directly for wins
+
+The complete pilot command is:
+
+```bash
+python -m pokemon_battler.win_experiment \
+  --output-dir outputs/qwen-win-pilot-1
+```
+
+It reuses or prepares the replay dataset, performs an outcome-conditioned
+offline warm start, collects sampled Qwen-versus-frozen-Qwen games on the local
+official Showdown server, runs clipped PPO updates, and promotes candidates
+through deterministic win-rate matches. Showdown executes game rules and
+returns observations; it never supplies an action recommendation. No MCTS,
+`poke-engine`, Foul Play, or external policy participates in training or
+inference.
+
+Every offline, candidate, rejected, and promoted model is stored separately.
+See [Training Qwen for battle wins](docs/qwen-win-training.md) for the objective,
+default budget, league behavior, team-pool controls, artifacts, limitations,
+and smoke-test command.
 
 ## Run the trained policy in local Showdown battles
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "pokemon-battler"
 version = "0.1.0"
-description = "SFT and evaluation harness for a small Pokémon Showdown policy model"
+description = "Offline-RL, self-play PPO, and evaluation harness for a Qwen Pokémon policy"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -31,6 +31,7 @@ pokemon-mechanics-baseline = "pokemon_battler.mechanics_baseline:main"
 pokemon-run = "pokemon_battler.experiment:main"
 pokemon-interaction-run = "pokemon_battler.interaction_experiment:main"
 pokemon-live-eval = "pokemon_battler.live_eval:main"
+pokemon-win-train = "pokemon_battler.win_experiment:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

@@ -2,8 +2,8 @@
 
 ## Vision
 
-Build an uncertainty-aware competitive Pokémon agent and post-game coach that
-can:
+Build a competitive Qwen Pokémon policy whose primary objective is match win
+rate. The policy should:
 
 1. Play complete Pokémon Showdown battles as a disclosed bot or practice
    opponent.
@@ -12,12 +12,12 @@ can:
    decision.
 4. Estimate the counterfactual match-win probability of alternative actions.
 5. Distinguish questionable decisions from bad luck and genuinely close calls.
-6. Use a stronger language model to explain calculated evidence and generate
-   personalized training exercises.
+6. Improve through outcome-aware replay training and self-play reinforcement
+   learning without delegating decisions to a search engine.
 
-The review system is the long-term differentiator. The language model should
-explain evidence produced by the policy, value model, and simulator; it should
-not invent move grades or win probabilities by itself.
+Replay review remains a possible application, but it is secondary to producing
+a strong direct policy. Showdown supplies rules, observations, and results. It
+does not supply the policy with recommended moves.
 
 ## Metric definitions
 
@@ -97,6 +97,14 @@ Implemented:
   handling.
 - A completed fixed-team live benchmark: 20–0 against each PokéChamp heuristic
   and 4–16 against Foul Play at 100 ms, with zero fallbacks over 1,659 decisions.
+- A separate per-action win-value head that leaves older interaction
+  checkpoints loadable.
+- Outcome-conditioned offline training of `Q(s,a)`, `V(s)`, and the legal Qwen
+  policy from terminal replay results.
+- Complete sampled self-play rollout capture with terminal-only rewards, GAE,
+  clipped PPO, value clipping, entropy, and KL monitoring.
+- A persistent frozen-Qwen league, promotion matches, non-overwriting candidate
+  checkpoints, lead rotations, and a single win-training command.
 
 Not yet implemented:
 
@@ -105,10 +113,32 @@ Not yet implemented:
 - Public-server account and ladder mode. The local client isolates this to
   connection configuration and matchmaking after local validation.
 - A replay-review interface.
-- A calibrated state-value or action-value model suitable for search or
-  counterfactual use. The current outcome head is an uncalibrated auxiliary.
+- Calibration evidence for the new state/action values across a broad team and
+  opponent distribution. The estimators now exist but are not calibrated by
+  implementation alone.
 - Counterfactual simulator analysis and regret.
 - Grounded natural-language coaching.
+- A learned team-preview policy. The first self-play pipeline rotates all six
+  submitted leads and accepts multiple team files, but Qwen's PPO action space
+  currently begins at the first battle turn.
+- GPU request batching across concurrent Showdown battles.
+
+## Phase 0.5 — Optimize complete-game wins
+
+Status: implemented and awaiting the first GPU pilot.
+
+The `pokemon_battler.win_experiment` runner uses the selected behavior-cloning
+checkpoint as a warm start, learns outcome-conditioned action and state values,
+collects Qwen-versus-frozen-Qwen games, applies PPO, and gates every candidate
+against the current champion. The only environmental reward is the final
+win/loss result. Search policies and mechanics engines are not in the training
+or inference path.
+
+The first run must establish whether promotion win rate improves while action
+legality remains perfect. If it does, scale the opponent/team population and
+promotion sample before changing the Qwen size. The exact command, artifacts,
+and limits are documented in
+[Training Qwen for battle wins](docs/qwen-win-training.md).
 
 ## Phase 0 — Validate the behavior-cloned policy
 

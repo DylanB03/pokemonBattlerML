@@ -152,6 +152,14 @@ class InteractionTests(unittest.TestCase):
                 qwen_mode="none",
             )
             outputs = head(torch.zeros((2, 16)), batch)
+            self.assertEqual(tuple(outputs["action_value_logits"].shape), (2, 13))
+            self.assertTrue(
+                torch.isneginf(
+                    outputs["action_value_logits"].masked_select(
+                        ~batch["legal_action_mask"]
+                    )
+                ).all()
+            )
             probabilities = outputs["action_log_probs"].exp()
             self.assertTrue(torch.allclose(probabilities.sum(dim=1), torch.ones(2)))
             self.assertTrue(

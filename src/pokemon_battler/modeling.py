@@ -238,7 +238,10 @@ def load_policy_model(
     model = AutoModelForCausalLM.from_pretrained(base_model_name, **load_kwargs)
 
     if adapter_path:
-        from peft import PeftModel
+        from peft import PeftModel, prepare_model_for_kbit_training
+
+        if for_training and load_in_4bit:
+            model = prepare_model_for_kbit_training(model)
 
         model = PeftModel.from_pretrained(
             model,
@@ -513,7 +516,22 @@ def load_interaction_head(
         ),
         qwen_mode=str(metadata.get("qwen_mode", "lora")),
     )
-    head.load_state_dict(load_safetensors(path, device=str(device)))
+    checkpoint_state = load_safetensors(path, device=str(device))
+    missing, unexpected = head.load_state_dict(checkpoint_state, strict=False)
+    # Checkpoints created before win-optimization intentionally lack the new
+    # action-value head.  It starts from its normal random initialization and is
+    # fitted by offline outcome training.  No other mismatch is accepted.
+    allowed_missing = {
+        "action_value_scorer.0.weight",
+        "action_value_scorer.0.bias",
+        "action_value_scorer.2.weight",
+        "action_value_scorer.2.bias",
+    }
+    if set(missing) - allowed_missing or unexpected:
+        raise RuntimeError(
+            "Interaction checkpoint tensors do not match this code: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
     return head
 
 

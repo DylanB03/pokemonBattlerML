@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from poke_env.battle.abstract_battle import AbstractBattle
@@ -105,7 +105,15 @@ class InteractionPolicyRuntime:
         )
         self.logits_parameter = indexed_logits_parameter(self.model)
 
-    def predict(self, row: dict[str, Any]) -> InteractionPrediction:
+    def predict(
+        self,
+        row: dict[str, Any],
+        *,
+        sample: bool = False,
+        temperature: float = 1.0,
+    ) -> InteractionPrediction:
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
         started = perf_counter()
         batch = {
             key: value.to(self.device)
@@ -125,9 +133,14 @@ class InteractionPolicyRuntime:
         }
         if not all(math.isfinite(value) for value in log_probabilities.values()):
             raise ValueError("Interaction policy returned a non-finite legal-action score")
-        preferences = {
-            action_id: math.exp(log_probability)
+        sampling_log_probabilities = {
+            action_id: log_probability / temperature
             for action_id, log_probability in log_probabilities.items()
+        }
+        maximum = max(sampling_log_probabilities.values())
+        preferences = {
+            action_id: math.exp(log_probability - maximum)
+            for action_id, log_probability in sampling_log_probabilities.items()
         }
         total = sum(preferences.values())
         if not math.isfinite(total) or total <= 0:
@@ -136,7 +149,26 @@ class InteractionPolicyRuntime:
             action_id: probability / total
             for action_id, probability in preferences.items()
         }
-        action_id = max(preferences, key=preferences.get)
+        # PPO must retain the probability distribution that actually sampled
+        # the action, including any rollout temperature.
+        log_probabilities = {
+            action_id: math.log(probability)
+            for action_id, probability in preferences.items()
+        }
+        if sample:
+            legal_ids = list(preferences)
+            sampled_index = int(
+                torch.multinomial(
+                    torch.tensor(
+                        [preferences[action_id] for action_id in legal_ids],
+                        dtype=torch.float32,
+                    ),
+                    1,
+                ).item()
+            )
+            action_id = legal_ids[sampled_index]
+        else:
+            action_id = max(preferences, key=preferences.get)
         entropy = -sum(
             probability * math.log(probability)
             for probability in preferences.values()
@@ -188,11 +220,17 @@ class InteractionPlayer(Player):
         *,
         trace_writer: DecisionTraceWriter | None = None,
         fail_fast: bool = False,
+        sample_actions: bool = False,
+        sampling_temperature: float = 1.0,
+        decision_callback: Callable[[dict[str, Any]], None] | None = None,
         **player_kwargs: Any,
     ) -> None:
         self.runtime = runtime
         self.trace_writer = trace_writer
         self.fail_fast = fail_fast
+        self.sample_actions = sample_actions
+        self.sampling_temperature = sampling_temperature
+        self.decision_callback = decision_callback
         self.trackers: dict[str, LiveBattleTracker] = {}
         self.decision_count = 0
         self.fallback_count = 0
@@ -252,7 +290,11 @@ class InteractionPlayer(Player):
         fallback_reason: str | None = None
         try:
             row = tracker.observe(battle)
-            prediction = self.runtime.predict(row)
+            prediction = self.runtime.predict(
+                row,
+                sample=self.sample_actions,
+                temperature=self.sampling_temperature,
+            )
             order = live_action_to_order(battle, prediction.action_id)
             if order is None:
                 raise ValueError(
@@ -260,6 +302,19 @@ class InteractionPlayer(Player):
                     "back to the current Showdown request"
                 )
             self.inference_latencies.append(prediction.latency_seconds)
+            if self.decision_callback is not None:
+                self.decision_callback(
+                    {
+                        "event": "decision",
+                        "battle_id": battle.battle_tag,
+                        "observation": row,
+                        "action_id": prediction.action_id,
+                        "old_log_probability": prediction.log_probabilities[
+                            prediction.action_id
+                        ],
+                        "value_probability": prediction.value_probability,
+                    }
+                )
         except Exception as exc:
             if self.fail_fast:
                 raise
@@ -278,6 +333,15 @@ class InteractionPlayer(Player):
         return order
 
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
+        if self.decision_callback is not None:
+            self.decision_callback(
+                {
+                    "event": "battle_finished",
+                    "battle_id": battle.battle_tag,
+                    "won": battle.won is True,
+                    "lost": battle.lost is True,
+                }
+            )
         if self.trace_writer is not None:
             self.trace_writer.write(
                 {

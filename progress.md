@@ -117,3 +117,31 @@ The proposed schema is documented in
 prepared-row version, cache arrays, 30-token structured layout, four-layer
 interaction encoder, legal hierarchy, optional value loss, Qwen ablations, and
 acceptance tests before implementation begins.
+
+## Direct win-optimization pipeline
+
+The project now has a Qwen-only learning path for the metric that matters:
+complete battle wins. The existing interaction checkpoint is retained as the
+behavior-cloning warm start. A new action-value head learns the logged action's
+terminal outcome, the state value uses expectile regression, and the policy is
+updated with advantage-weighted imitation before self-play begins.
+
+Local Showdown self-play records sampled legal actions, exact old log
+probabilities, centered values, terminal rewards, GAE advantages, and returns.
+The PPO updater uses policy and value clipping, entropy regularization, gradient
+clipping, and a target-KL stop. A persistent league samples frozen Qwen
+checkpoints and promotes a candidate only through complete-game evaluation.
+Rejected models remain on disk.
+
+The first pilot command is:
+
+```bash
+python -m pokemon_battler.win_experiment \
+  --output-dir outputs/qwen-win-pilot-1
+```
+
+No search engine or external opponent chooses actions in this pipeline.
+Showdown is used only for battle mechanics and observations. The default team
+fixture is expanded into six lead rotations; multiple genuine team files can
+be supplied for broader training. The implementation and limitations are in
+[docs/qwen-win-training.md](docs/qwen-win-training.md).

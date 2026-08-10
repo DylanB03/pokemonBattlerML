@@ -115,6 +115,15 @@ class InteractionPolicyHead(torch.nn.Module):
             enable_nested_tensor=False,
         )
         self.candidate_scorer = torch.nn.Linear(d_model, 1)
+        # The policy scorer answers "what will I do?" while this separate head
+        # answers "how likely is this legal action to lead to a win?".  Keeping
+        # them separate is important: behavior-cloning logits are not action
+        # values and cannot support an offline-RL or actor-critic objective.
+        self.action_value_scorer = torch.nn.Sequential(
+            torch.nn.Linear(d_model, d_model // 2),
+            torch.nn.GELU(),
+            torch.nn.Linear(d_model // 2, 1),
+        )
         self.family_scorer = torch.nn.Linear(d_model, 3)
         self.value_scorer = torch.nn.Sequential(
             torch.nn.Linear(d_model, d_model // 2),
@@ -318,6 +327,9 @@ class InteractionPolicyHead(torch.nn.Module):
             "family_logits": masked_family_logits,
             "family_legal_mask": self._family_legal_mask(candidate_mask),
             "value_logits": self.value_scorer(global_output).squeeze(-1),
+            "action_value_logits": self.action_value_scorer(candidate_output)
+            .squeeze(-1)
+            .masked_fill(~candidate_mask, float("-inf")),
         }
 
 
