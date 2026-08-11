@@ -107,7 +107,8 @@ policy stays frozen within every public batch. Between batches, PPO writes a
 new candidate, local candidate-versus-champion games decide promotion, and all
 accepted and rejected checkpoints remain separate. The default public policy
 comes from `outputs/qwen-win-pilot-1/selected_checkpoint.txt`, not the older
-interaction-policy default. See
+interaction-policy default. Finite public runs have no overall wall-clock
+timeout and wait for all requested games to finish. See
 [Public Showdown play and between-game learning](docs/public-showdown-learning.md)
 for `.env` fields, commands, safeguards, artifacts, and ladder limitations.
 

@@ -62,6 +62,11 @@ preview is randomized because the current 13-action policy begins after team
 preview and should not expose a permanent slot-one lead. Use
 `--team-preview first` only for a deliberately fixed-lead measurement.
 
+There is no wall-clock deadline on a battle session. A finite `--games` run
+waits until every requested game has ended before closing the connection, even
+when the run takes several hours. `--login-timeout` applies only while initially
+authenticating, before matchmaking begins; it can never terminate a battle.
+
 The default checkpoint is read from:
 
 ```text
@@ -145,7 +150,7 @@ Showdown's current rules, rate limits, bot limiters, and staff discretion. Do
 not use multiple controlled accounts for rated games, manipulate usage, enter
 suspect tests, timer-stall, or run an unattended high-volume loop. The runner
 starts Showdown's battle timer and caps every invocation at the requested game
-count.
+count. It does not abandon an active battle when an overall runtime is reached.
 
 ## What this does not learn
 

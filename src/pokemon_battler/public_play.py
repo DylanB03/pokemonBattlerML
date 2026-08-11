@@ -154,7 +154,6 @@ async def _run_matchmaking(
     mode: str,
     opponent: str | None,
     games: int,
-    session_timeout: float | None,
 ) -> None:
     if mode == "login":
         return
@@ -168,17 +167,10 @@ async def _run_matchmaking(
         operation = player.ladder(games)
     else:  # pragma: no cover - protected by argparse and validation
         raise ValueError(f"Unknown public mode: {mode}")
-
-    if session_timeout is None:
-        await operation
-    else:
-        try:
-            await asyncio.wait_for(operation, timeout=session_timeout)
-        except TimeoutError as exc:
-            raise TimeoutError(
-                f"Public {mode} session did not finish within "
-                f"{session_timeout:g} seconds"
-            ) from exc
+    # A wall-clock deadline here can cancel poke-env's matchmaking coroutine while
+    # a rated battle is active. Let the finite game-count operation finish so the
+    # client never abandons a battle merely because the overall run took too long.
+    await operation
 
 
 def _public_summary(
@@ -190,9 +182,10 @@ def _public_summary(
     error: str | None,
 ) -> dict[str, Any]:
     battles = list(player.battles.values())
-    wins = sum(battle.won is True for battle in battles)
-    losses = sum(battle.lost is True for battle in battles)
-    ties = len(battles) - wins - losses
+    finished_battles = [battle for battle in battles if battle.finished]
+    wins = sum(battle.won is True for battle in finished_battles)
+    losses = sum(battle.lost is True for battle in finished_battles)
+    ties = len(finished_battles) - wins - losses
     return {
         "schema": PUBLIC_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -202,12 +195,14 @@ def _public_summary(
         "battle_format": args.battle_format,
         "team_file": str(args.team_file),
         "requested_games": 0 if args.mode == "login" else args.games,
-        "finished_games": len(battles),
+        "started_games": len(battles),
+        "finished_games": len(finished_battles),
+        "unfinished_games": len(battles) - len(finished_battles),
         "wins": wins,
         "losses": losses,
         "ties": ties,
-        "win_rate": wins / len(battles) if battles else None,
-        "win_rate_wilson_95": _wilson_interval(wins, len(battles)),
+        "win_rate": wins / len(finished_battles) if finished_battles else None,
+        "win_rate_wilson_95": _wilson_interval(wins, len(finished_battles)),
         "decisions": player.decision_count,
         "fallbacks": player.fallback_count,
         "fallback_rate": (
@@ -224,6 +219,7 @@ def _public_summary(
         "battles": [
             {
                 "battle_id": battle.battle_tag,
+                "finished": battle.finished,
                 "won": battle.won,
                 "lost": battle.lost,
                 "turns": battle.turn,
@@ -296,7 +292,6 @@ async def _play_public_batch(
             mode=args.mode,
             opponent=opponent,
             games=args.games,
-            session_timeout=args.session_timeout,
         )
     except Exception as exc:
         session_error = exc
@@ -371,8 +366,6 @@ def _validate_args(args: argparse.Namespace, opponent: str | None) -> None:
         raise ValueError("Multiple --batches require --learn")
     if args.login_timeout <= 0:
         raise ValueError("--login-timeout must be positive")
-    if args.session_timeout is not None and args.session_timeout <= 0:
-        raise ValueError("--session-timeout must be positive or omitted")
     if args.sampling_temperature <= 0:
         raise ValueError("--sampling-temperature must be positive")
     if not 0 <= args.gamma <= 1 or not 0 <= args.gae_lambda <= 1:
@@ -633,7 +626,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--login-timeout", type=float, default=30.0)
-    parser.add_argument("--session-timeout", type=float, default=7200.0)
     parser.add_argument("--fail-fast", action="store_true")
 
     parser.add_argument("--learn", action="store_true")

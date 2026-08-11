@@ -160,5 +160,7 @@ batch, rejects incomplete or fallback-contaminated trajectories, trains a new
 checkpoint between games, and runs local candidate-versus-champion promotion.
 Rejected candidates stay on disk. Public team preview is randomized rather
 than permanently leading team slot one, but preview itself is not yet a learned
-action. Usage and commands are documented in
+action. Public matchmaking now waits for the finite requested game count with
+no overall wall-clock cancellation, and summaries distinguish started,
+finished, and unfinished battles. Usage and commands are documented in
 [docs/public-showdown-learning.md](docs/public-showdown-learning.md).

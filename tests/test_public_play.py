@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import tempfile
 import unittest
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from pokemon_battler.public_play import (
     OPPONENT_KEY,
     PASSWORD_KEY,
     USERNAME_KEY,
+    _public_summary,
+    _run_matchmaking,
     _validate_args,
     build_parser,
     load_public_environment,
@@ -75,6 +79,87 @@ class PublicPlayTests(unittest.TestCase):
         self.assertFalse(args.learn)
         self.assertIsNone(args.sample_actions)
         self.assertTrue(args.start_timer)
+        self.assertFalse(hasattr(args, "session_timeout"))
+
+    def test_ladder_waits_for_requested_games_without_a_wall_clock_timeout(
+        self,
+    ) -> None:
+        player = SimpleNamespace(ladder=AsyncMock())
+        asyncio.run(
+            _run_matchmaking(
+                player,
+                mode="ladder",
+                opponent=None,
+                games=50,
+            )
+        )
+        player.ladder.assert_awaited_once_with(50)
+
+    def test_public_summary_does_not_count_an_active_battle_as_a_tie(self) -> None:
+        finished_win = SimpleNamespace(
+            battle_tag="battle-win",
+            finished=True,
+            won=True,
+            lost=False,
+            turn=12,
+            opponent_username="WinnerOpponent",
+            rating=1010,
+            opponent_rating=1000,
+        )
+        finished_loss = SimpleNamespace(
+            battle_tag="battle-loss",
+            finished=True,
+            won=False,
+            lost=True,
+            turn=20,
+            opponent_username="LossOpponent",
+            rating=1040,
+            opponent_rating=1050,
+        )
+        active = SimpleNamespace(
+            battle_tag="battle-active",
+            finished=False,
+            won=None,
+            lost=None,
+            turn=8,
+            opponent_username="ActiveOpponent",
+            rating=None,
+            opponent_rating=None,
+        )
+        player = SimpleNamespace(
+            battles={
+                battle.battle_tag: battle
+                for battle in (finished_win, finished_loss, active)
+            },
+            username="PublicBot",
+            decision_count=10,
+            fallback_count=0,
+            inference_latencies=[],
+        )
+        args = SimpleNamespace(
+            mode="ladder",
+            battle_format="gen9ou",
+            team_file=Path("team.txt"),
+            games=50,
+            sample_actions=False,
+            sampling_temperature=1.0,
+            team_preview="random",
+        )
+        summary = _public_summary(
+            args,
+            checkpoint=Path("checkpoint"),
+            player=player,
+            rollout={},
+            error=None,
+        )
+        self.assertEqual(summary["started_games"], 3)
+        self.assertEqual(summary["finished_games"], 2)
+        self.assertEqual(summary["unfinished_games"], 1)
+        self.assertEqual(summary["wins"], 1)
+        self.assertEqual(summary["losses"], 1)
+        self.assertEqual(summary["ties"], 0)
+        self.assertEqual(summary["win_rate"], 0.5)
+        self.assertFalse(summary["battles"][-1]["finished"])
 
     def test_login_artifacts_never_contain_the_password(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
