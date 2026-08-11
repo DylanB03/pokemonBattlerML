@@ -346,6 +346,10 @@ class InteractionPlayer(Player):
                     "battle_id": battle.battle_tag,
                     "won": battle.won is True,
                     "lost": battle.lost is True,
+                    "opponent": battle.opponent_username,
+                    "turns": battle.turn,
+                    "rating": battle.rating,
+                    "opponent_rating": battle.opponent_rating,
                 }
             )
         if self.trace_writer is not None:

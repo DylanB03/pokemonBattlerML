@@ -133,6 +133,39 @@ class FakeTokenizer:
 
 
 class LivePolicyTests(unittest.TestCase):
+    def test_finished_battle_callback_includes_terminal_progress_fields(self) -> None:
+        events = []
+        player = object.__new__(InteractionPlayer)
+        player.decision_callback = events.append
+        player.trace_writer = None
+        battle = SimpleNamespace(
+            battle_tag="battle-gen9ou-finished",
+            won=True,
+            lost=False,
+            opponent_username="HumanOpponent",
+            turn=19,
+            rating=1100,
+            opponent_rating=1080,
+        )
+
+        player._battle_finished_callback(battle)
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "event": "battle_finished",
+                    "battle_id": "battle-gen9ou-finished",
+                    "won": True,
+                    "lost": False,
+                    "opponent": "HumanOpponent",
+                    "turns": 19,
+                    "rating": 1100,
+                    "opponent_rating": 1080,
+                }
+            ],
+        )
+
     def test_public_preview_policy_can_randomize_the_lead(self) -> None:
         player = object.__new__(InteractionPlayer)
         player.team_preview_policy = "random"

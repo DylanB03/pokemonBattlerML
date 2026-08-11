@@ -67,6 +67,14 @@ waits until every requested game has ended before closing the connection, even
 when the run takes several hours. `--login-timeout` applies only while initially
 authenticating, before matchmaking begins; it can never terminate a battle.
 
+Every completed game immediately prints its result, opponent, turn count,
+cumulative win-loss-tie record, and win rate. The end of each public batch
+prints the same compact record plus fallbacks and unfinished games. Learning
+runs also announce the start and completion of PPO training, its update count,
+approximate KL and duration, followed by the candidate-versus-champion result
+and promotion decision. The full machine-readable details remain in the JSON
+artifacts rather than flooding the terminal.
+
 The default checkpoint is read from:
 
 ```text

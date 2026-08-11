@@ -6,7 +6,7 @@ import gc
 import json
 import os
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +50,45 @@ PUBLIC_MODES = ("login", "accept", "challenge", "ladder")
 class PublicEnvironment:
     account: AccountConfiguration
     opponent: str | None
+
+
+@dataclass
+class PublicBattleProgress:
+    """Print one compact cumulative result line per completed public battle."""
+
+    requested_games: int
+    completed_games: int = 0
+    wins: int = 0
+    losses: int = 0
+    ties: int = 0
+    seen_battle_ids: set[str] = field(default_factory=set)
+
+    def record(self, event: Mapping[str, Any]) -> None:
+        battle_id = str(event["battle_id"])
+        if battle_id in self.seen_battle_ids:
+            return
+        self.seen_battle_ids.add(battle_id)
+        self.completed_games += 1
+        if event["won"]:
+            self.wins += 1
+            result = "WIN"
+        elif event["lost"]:
+            self.losses += 1
+            result = "LOSS"
+        else:
+            self.ties += 1
+            result = "TIE"
+
+        opponent = event.get("opponent") or "unknown opponent"
+        turns = event.get("turns")
+        turn_text = f" | turns {turns}" if turns is not None else ""
+        win_rate = self.wins / self.completed_games
+        print(
+            f"[public {self.completed_games}/{self.requested_games}] {result} "
+            f"vs {opponent} | record {self.wins}-{self.losses}-{self.ties} | "
+            f"win rate {win_rate:.1%}{turn_text}",
+            flush=True,
+        )
 
 
 def load_public_environment(
@@ -232,6 +271,32 @@ def _public_summary(
     }
 
 
+def _print_public_summary(summary: Mapping[str, Any]) -> None:
+    finished = int(summary["finished_games"])
+    requested = int(summary["requested_games"])
+    wins = int(summary["wins"])
+    losses = int(summary["losses"])
+    ties = int(summary["ties"])
+    win_rate = wins / finished if finished else 0.0
+    print(
+        f"[public summary] completed {finished}/{requested} | "
+        f"record {wins}-{losses}-{ties} | win rate {win_rate:.1%} | "
+        f"fallbacks {summary['fallbacks']} | unfinished {summary['unfinished_games']}",
+        flush=True,
+    )
+
+
+def _format_duration(seconds: float) -> str:
+    rounded = max(0, round(seconds))
+    minutes, remaining_seconds = divmod(rounded, 60)
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {remaining_minutes}m {remaining_seconds}s"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+
 async def _play_public_batch(
     args: argparse.Namespace,
     *,
@@ -242,6 +307,7 @@ async def _play_public_batch(
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=False)
     buffer = WinTrajectoryBuffer(gamma=args.gamma, gae_lambda=args.gae_lambda)
+    progress = PublicBattleProgress(args.games)
 
     def receive(event: dict[str, Any]) -> None:
         if event["event"] == "decision":
@@ -256,6 +322,7 @@ async def _play_public_batch(
             buffer.finish_battle(
                 event["battle_id"], won=event["won"], lost=event["lost"]
             )
+            progress.record(event)
 
     runtime = InteractionPolicyRuntime(
         checkpoint,
@@ -287,6 +354,11 @@ async def _play_public_batch(
     close_error: Exception | None = None
     try:
         await _wait_for_login(player, args.login_timeout)
+        print(
+            f"[public] logged in as {player.username} | mode {args.mode} | "
+            f"games {args.games}",
+            flush=True,
+        )
         await _run_matchmaking(
             player,
             mode=args.mode,
@@ -313,6 +385,7 @@ async def _play_public_batch(
     (output_dir / "public_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    _print_public_summary(summary)
     if error is not None:
         raise RuntimeError(
             f"Public session failed; partial artifacts were saved to {output_dir}"
@@ -468,8 +541,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         (output_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        print(json.dumps(summary, indent=2, sort_keys=True))
-        print(f"Saved public Showdown login probe to {output_dir}")
+        status = "success" if login_summary["logged_in"] else "failed"
+        print(
+            f"[login] {status} | account {login_summary['account']} | "
+            f"server {login_summary['server']}",
+            flush=True,
+        )
+        print(f"[run complete] summary {output_dir / 'summary.json'}", flush=True)
         if not login_summary["logged_in"]:
             raise RuntimeError(
                 "Public Pokémon Showdown login probe failed; see summary.json"
@@ -486,6 +564,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     batches: list[dict[str, Any]] = []
     for batch_number in range(1, args.batches + 1):
         batch_dir = output_dir / f"batch-{batch_number:03d}"
+        print(
+            f"[batch {batch_number}/{args.batches}] starting public games | "
+            f"checkpoint {champion_checkpoint}",
+            flush=True,
+        )
         public_summary = asyncio.run(
             _play_public_batch(
                 args,
@@ -520,6 +603,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "Refusing to train on incomplete or empty public trajectories"
                 )
             candidate_checkpoint = batch_dir / "candidate"
+            print(
+                f"[learn] training PPO candidate | decisions {rollout['decisions']} | "
+                f"output {candidate_checkpoint}",
+                flush=True,
+            )
             training = train_ppo_rollouts(
                 checkpoint=champion_checkpoint,
                 rollout_file=batch_dir / "public" / "rollouts.jsonl",
@@ -547,7 +635,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 rollout_source="public-showdown",
             )
             batch_report["training"] = training
+            print(
+                f"[learn] PPO complete | updates {training.get('updates', 'unknown')} | "
+                f"approx KL {float(training.get('approximate_kl', 0.0)):.5f} | "
+                f"elapsed {_format_duration(float(training.get('elapsed_seconds', 0.0)))}",
+                flush=True,
+            )
             _release_models()
+            print(
+                f"[promotion] candidate vs champion | games {args.promotion_games}",
+                flush=True,
+            )
             promotion = _promotion_evaluation(
                 _promotion_args(args),
                 candidate_checkpoint=candidate_checkpoint,
@@ -568,6 +666,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             batch_report["league_result"] = league_result
             champion_checkpoint = Path(league.champion["checkpoint"])
+            print(
+                f"[promotion] record {promotion['wins']}-{promotion['losses']}-"
+                f"{promotion['ties']} | score {float(promotion['score']):.1%} | "
+                f"promoted {'yes' if league_result['promoted'] else 'no'}",
+                flush=True,
+            )
             _release_models()
 
         batches.append(batch_report)
@@ -591,8 +695,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(json.dumps(summary, indent=2, sort_keys=True))
-    print(f"Saved public Showdown run to {output_dir}")
+    print(f"[run complete] selected checkpoint {champion_checkpoint.resolve()}", flush=True)
+    print(f"[run complete] summary {output_dir / 'summary.json'}", flush=True)
     return summary
 
 

@@ -108,7 +108,10 @@ new candidate, local candidate-versus-champion games decide promotion, and all
 accepted and rejected checkpoints remain separate. The default public policy
 comes from `outputs/qwen-win-pilot-1/selected_checkpoint.txt`, not the older
 interaction-policy default. Finite public runs have no overall wall-clock
-timeout and wait for all requested games to finish. See
+timeout and wait for all requested games to finish. The terminal reports every
+completed game's result and cumulative win-loss-tie record, then prints compact
+public-batch, PPO, and promotion summaries while retaining the full details in
+JSON. See
 [Public Showdown play and between-game learning](docs/public-showdown-learning.md)
 for `.env` fields, commands, safeguards, artifacts, and ladder limitations.
 

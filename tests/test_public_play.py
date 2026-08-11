@@ -13,7 +13,10 @@ from unittest.mock import AsyncMock, patch
 from pokemon_battler.public_play import (
     OPPONENT_KEY,
     PASSWORD_KEY,
+    PublicBattleProgress,
     USERNAME_KEY,
+    _format_duration,
+    _print_public_summary,
     _public_summary,
     _run_matchmaking,
     _validate_args,
@@ -25,6 +28,58 @@ from pokemon_battler.public_play import (
 
 
 class PublicPlayTests(unittest.TestCase):
+    def test_public_progress_prints_and_deduplicates_cumulative_results(self) -> None:
+        progress = PublicBattleProgress(requested_games=3)
+        terminal = io.StringIO()
+        win = {
+            "event": "battle_finished",
+            "battle_id": "battle-win",
+            "won": True,
+            "lost": False,
+            "opponent": "FirstOpponent",
+            "turns": 14,
+        }
+        loss = {
+            "event": "battle_finished",
+            "battle_id": "battle-loss",
+            "won": False,
+            "lost": True,
+            "opponent": "SecondOpponent",
+            "turns": 22,
+        }
+        with contextlib.redirect_stdout(terminal):
+            progress.record(win)
+            progress.record(win)
+            progress.record(loss)
+
+        output = terminal.getvalue()
+        self.assertIn("[public 1/3] WIN vs FirstOpponent", output)
+        self.assertIn("record 1-0-0 | win rate 100.0% | turns 14", output)
+        self.assertIn("[public 2/3] LOSS vs SecondOpponent", output)
+        self.assertIn("record 1-1-0 | win rate 50.0% | turns 22", output)
+        self.assertEqual(progress.completed_games, 2)
+
+    def test_public_final_summary_is_compact(self) -> None:
+        terminal = io.StringIO()
+        with contextlib.redirect_stdout(terminal):
+            _print_public_summary(
+                {
+                    "requested_games": 5,
+                    "finished_games": 4,
+                    "wins": 2,
+                    "losses": 1,
+                    "ties": 1,
+                    "fallbacks": 0,
+                    "unfinished_games": 1,
+                }
+            )
+        self.assertEqual(
+            terminal.getvalue().strip(),
+            "[public summary] completed 4/5 | record 2-1-1 | win rate 50.0% | "
+            "fallbacks 0 | unfinished 1",
+        )
+        self.assertEqual(_format_duration(941.9), "15m 42s")
+
     def test_env_file_loads_credentials_and_optional_opponent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             env_file = Path(temporary) / ".env"

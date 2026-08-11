@@ -162,5 +162,18 @@ Rejected candidates stay on disk. Public team preview is randomized rather
 than permanently leading team slot one, but preview itself is not yet a learned
 action. Public matchmaking now waits for the finite requested game count with
 no overall wall-clock cancellation, and summaries distinguish started,
-finished, and unfinished battles. Usage and commands are documented in
+finished, and unfinished battles. It also streams each completed result and the
+cumulative win-loss-tie record to the terminal, with compact PPO and promotion
+phase summaries for learning runs. Usage and commands are documented in
 [docs/public-showdown-learning.md](docs/public-showdown-learning.md).
+
+The first completed public PPO batch, `outputs/public-learning/ladder-001`,
+collected 32 sampled ladder games with the prior champion: 12 wins and 20
+losses, with 862 decisions and no fallbacks. PPO trained for 108 updates and
+reached an approximate KL of 0.00891 against the 0.01 target. In the balanced
+local promotion test, the candidate then beat that prior champion 29-11 over
+40 games (72.5%; Wilson 95% interval 57.2-83.9%) and won both seat orientations,
+14-6 and 15-5. It passed the 55% candidate-versus-champion gate and became the
+selected checkpoint. This is direct evidence of improvement against the old
+checkpoint under the local test; it is not yet evidence of a higher public
+ladder win rate because those 32 public games were played before the update.
