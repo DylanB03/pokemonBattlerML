@@ -8,7 +8,7 @@ import unittest
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pokemon_battler.public_play import (
     OPPONENT_KEY,
@@ -287,7 +287,12 @@ class PublicPlayTests(unittest.TestCase):
             )
             public_summary = {
                 "finished_games": 16,
+                "wins": 8,
+                "losses": 8,
+                "ties": 0,
+                "decisions": 24,
                 "fallbacks": 0,
+                "battles": [],
                 "rollout": {"pending_battles": 0, "decisions": 24},
             }
 
@@ -323,11 +328,188 @@ class PublicPlayTests(unittest.TestCase):
                 .strip(),
                 str(candidate.resolve()),
             )
+            self.assertEqual(summary["campaign"]["model_improvement"]["ppo_candidates_promoted"], 1)
+
+    def test_campaign_stops_before_training_when_public_score_is_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / ".env"
+            env_file.write_text(
+                f"{USERNAME_KEY}=LearningBot\n{PASSWORD_KEY}=secret\n",
+                encoding="utf-8",
+            )
+            checkpoint = root / "initial"
+            checkpoint.mkdir()
+            output_dir = root / "positive-campaign"
+            args = build_parser().parse_args(
+                [
+                    "--env-file",
+                    str(env_file),
+                    "--mode",
+                    "ladder",
+                    "--games",
+                    "16",
+                    "--batches",
+                    "3",
+                    "--stop-win-rate",
+                    "0.5",
+                    "--learn",
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+            public_summary = {
+                "finished_games": 16,
+                "wins": 9,
+                "losses": 7,
+                "ties": 0,
+                "decisions": 24,
+                "fallbacks": 0,
+                "battles": [],
+                "rollout": {"pending_battles": 0, "decisions": 24},
+            }
+            train = Mock()
+            promotion = Mock()
+            with (
+                patch(
+                    "pokemon_battler.public_play._play_public_batch",
+                    new=AsyncMock(return_value=public_summary),
+                ) as play,
+                patch("pokemon_battler.public_play.train_ppo_rollouts", train),
+                patch("pokemon_battler.public_play._promotion_evaluation", promotion),
+                patch("pokemon_battler.public_play._release_models"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                summary = run(args)
+
+            play.assert_awaited_once()
+            train.assert_not_called()
+            promotion.assert_not_called()
+            self.assertEqual(summary["campaign"]["stop_reason"], "positive_win_rate")
+            self.assertTrue(summary["campaign"]["positive_win_rate_reached"])
+            self.assertEqual(summary["campaign"]["completed_batches"], 1)
+            self.assertEqual(summary["campaign"]["public"]["wins"], 9)
+            self.assertEqual(summary["campaign"]["maximum_public_games"], 48)
+            self.assertEqual(
+                summary["batches"][0]["training_skipped_reason"],
+                "positive_win_rate_reached",
+            )
+            self.assertTrue((output_dir / "campaign_summary.json").is_file())
+
+    def test_each_promoted_candidate_is_the_next_ppo_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / ".env"
+            env_file.write_text(
+                f"{USERNAME_KEY}=LearningBot\n{PASSWORD_KEY}=secret\n",
+                encoding="utf-8",
+            )
+            initial = root / "initial"
+            initial.mkdir()
+            output_dir = root / "chained-campaign"
+            args = build_parser().parse_args(
+                [
+                    "--env-file",
+                    str(env_file),
+                    "--mode",
+                    "ladder",
+                    "--games",
+                    "16",
+                    "--batches",
+                    "2",
+                    "--learn",
+                    "--checkpoint",
+                    str(initial),
+                    "--output-dir",
+                    str(output_dir),
+                    "--promotion-games",
+                    "2",
+                ]
+            )
+            public_summary = {
+                "finished_games": 16,
+                "wins": 8,
+                "losses": 8,
+                "ties": 0,
+                "decisions": 24,
+                "fallbacks": 0,
+                "battles": [],
+                "rollout": {"pending_battles": 0, "decisions": 24},
+            }
+            training_sources: list[Path] = []
+
+            def fake_train(**kwargs):
+                source = kwargs["checkpoint"].resolve()
+                training_sources.append(source)
+                kwargs["output_dir"].mkdir(parents=True)
+                return {
+                    "schema": "qwen-ppo-update-v1",
+                    "source_checkpoint": str(source),
+                    "updates": 2,
+                    "approximate_kl": 0.005,
+                }
+
+            promotion = {"wins": 2, "losses": 0, "ties": 0, "score": 1.0}
+            with (
+                patch(
+                    "pokemon_battler.public_play._play_public_batch",
+                    new=AsyncMock(side_effect=[public_summary, public_summary]),
+                ),
+                patch(
+                    "pokemon_battler.public_play.train_ppo_rollouts",
+                    side_effect=fake_train,
+                ),
+                patch(
+                    "pokemon_battler.public_play._promotion_evaluation",
+                    return_value=promotion,
+                ),
+                patch("pokemon_battler.public_play._release_models"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                summary = run(args)
+
+            first_candidate = output_dir / "batch-001" / "candidate"
+            second_candidate = output_dir / "batch-002" / "candidate"
+            self.assertEqual(
+                training_sources,
+                [initial.resolve(), first_candidate.resolve()],
+            )
+            self.assertEqual(
+                summary["selected_checkpoint"], str(second_candidate.resolve())
+            )
+            improvement = summary["campaign"]["model_improvement"]
+            self.assertEqual(improvement["ppo_candidates_trained"], 2)
+            self.assertEqual(improvement["ppo_candidates_promoted"], 2)
+            self.assertEqual(improvement["ppo_updates"], 4)
+            self.assertFalse(improvement["selected_checkpoint_has_public_batch"])
+            self.assertEqual(
+                improvement["checkpoint_chain"],
+                [
+                    str(initial.resolve()),
+                    str(first_candidate.resolve()),
+                    str(second_candidate.resolve()),
+                ],
+            )
 
     def test_accept_requires_an_allowlisted_opponent(self) -> None:
         args = build_parser().parse_args(["--mode", "accept"])
         args.sample_actions = False
         with self.assertRaisesRegex(ValueError, "requires --opponent"):
+            _validate_args(args, None)
+
+    def test_stop_win_rate_requires_learning_and_a_valid_threshold(self) -> None:
+        args = build_parser().parse_args(["--mode", "ladder", "--stop-win-rate", "0.5"])
+        args.sample_actions = False
+        with self.assertRaisesRegex(ValueError, "requires --learn"):
+            _validate_args(args, None)
+
+        args = build_parser().parse_args(
+            ["--mode", "ladder", "--learn", "--stop-win-rate", "1.0"]
+        )
+        args.sample_actions = True
+        with self.assertRaisesRegex(ValueError, r"must be in \[0, 1\)"):
             _validate_args(args, None)
 
     def test_learning_enables_only_unit_temperature_sampled_rollouts(self) -> None:

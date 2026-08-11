@@ -119,6 +119,44 @@ PPO currently requires sampling temperature `1.0`. This is enforced because
 the saved old action probability must describe the exact distribution that the
 candidate recomputes. Evaluation without `--learn` remains greedy by default.
 
+### Bounded continuous campaign
+
+This command plays consecutive 100-game learning batches, stops as soon as a
+batch has more wins than losses, and otherwise stops after 1,000 public games:
+
+```bash
+python -m pokemon_battler.public_play \
+  --mode ladder \
+  --games 100 \
+  --batches 10 \
+  --stop-win-rate 0.5 \
+  --learn \
+  --checkpoint outputs/public-learning/ladder-001/selected_checkpoint.txt \
+  --output-dir outputs/public-learning/positive-winrate-1000
+```
+
+The threshold comparison is strict: a 50-50 batch continues, while 51-49
+stops. Ties count as half a point, so the equivalent rule is that wins must
+exceed losses. When a batch misses the target, PPO initializes from the current
+selected checkpoint. A promoted candidate becomes the next batch's source; a
+rejected candidate remains on disk but is not allowed to degrade the chain.
+Checkpoint directories are separate model versions, not independent training
+restarts.
+
+When a batch reaches the target, training stops before another PPO update. This
+preserves the exact checkpoint whose public batch met the criterion. At the
+1,000-game ceiling, the final batch is still used for PPO and local promotion;
+the summary explicitly says whether the final selected candidate has itself
+played a subsequent public batch.
+
+Each `batch-NNN/batch_summary.json` contains that batch's public result, PPO
+metrics, source and candidate checkpoints, promotion match, and selection
+decision. `campaign_summary.json` is rewritten after every completed batch and
+aggregates the public record, observed rating change, fallbacks, candidate
+counts, PPO updates, promotion record, public score change, and complete
+promoted-checkpoint chain. `summary.json` embeds both the individual reports
+and the final campaign summary.
+
 ## Artifacts
 
 A learning run stores:

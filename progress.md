@@ -177,3 +177,13 @@ local promotion test, the candidate then beat that prior champion 29-11 over
 selected checkpoint. This is direct evidence of improvement against the old
 checkpoint under the local test; it is not yet evidence of a higher public
 ladder win rate because those 32 public games were played before the update.
+
+Bounded campaign execution is now supported with `--stop-win-rate`. The target
+100-by-10 configuration can play at most 1,000 public games and stops early when
+a complete batch has more wins than losses. Every PPO update records its source
+checkpoint, and every promoted candidate is the source for the following
+batch; rejected candidates remain recoverable without entering the active
+chain. Per-batch JSON records and a continuously refreshed campaign summary
+report aggregate public results, observed rating movement, PPO updates,
+candidate promotions, checkpoint lineage, and whether the final selected model
+has itself been tested in a later public batch.

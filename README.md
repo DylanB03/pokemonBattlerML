@@ -114,6 +114,9 @@ public-batch, PPO, and promotion summaries while retaining the full details in
 JSON. See
 [Public Showdown play and between-game learning](docs/public-showdown-learning.md)
 for `.env` fields, commands, safeguards, artifacts, and ladder limitations.
+The documented bounded campaign mode can run ten 100-game learning batches,
+chain each promoted PPO model from its predecessor, stop early above a 50%
+batch score, and emit per-batch plus aggregate model-improvement reports.
 
 ## Run the new interaction policy end to end
 

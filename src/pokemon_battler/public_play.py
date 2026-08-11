@@ -297,6 +297,164 @@ def _format_duration(seconds: float) -> str:
     return f"{remaining_seconds}s"
 
 
+def _result_score(summary: Mapping[str, Any]) -> float:
+    games = int(summary["finished_games"])
+    if not games:
+        return 0.0
+    return (int(summary["wins"]) + 0.5 * int(summary["ties"])) / games
+
+
+def _campaign_summary(
+    args: argparse.Namespace,
+    batches: Sequence[Mapping[str, Any]],
+    *,
+    initial_checkpoint: Path,
+    selected_checkpoint: Path,
+    stop_reason: str,
+) -> dict[str, Any]:
+    public = [batch["public"] for batch in batches]
+    finished = sum(int(item["finished_games"]) for item in public)
+    wins = sum(int(item["wins"]) for item in public)
+    losses = sum(int(item["losses"]) for item in public)
+    ties = sum(int(item["ties"]) for item in public)
+    decisions = sum(int(item["decisions"]) for item in public)
+    fallbacks = sum(int(item["fallbacks"]) for item in public)
+    ratings = [
+        float(battle["rating"])
+        for item in public
+        for battle in item.get("battles", [])
+        if battle.get("finished") and battle.get("rating") is not None
+    ]
+    promotions = [
+        batch["promotion"] for batch in batches if batch.get("promotion") is not None
+    ]
+    training = [
+        batch["training"] for batch in batches if batch.get("training") is not None
+    ]
+    promotion_games = sum(
+        int(item["wins"]) + int(item["losses"]) + int(item["ties"])
+        for item in promotions
+    )
+    promotion_wins = sum(int(item["wins"]) for item in promotions)
+    promotion_ties = sum(int(item["ties"]) for item in promotions)
+    batch_scores = [_result_score(item) for item in public]
+    positive_reached = any(
+        bool(batch.get("stop_condition", {}).get("reached")) for batch in batches
+    )
+    promoted = sum(
+        bool((batch.get("league_result") or {}).get("promoted")) for batch in batches
+    )
+    observed_rating_change = ratings[-1] - ratings[0] if ratings else None
+    public_score = (wins + 0.5 * ties) / finished if finished else 0.0
+    promotion_score = (
+        (promotion_wins + 0.5 * promotion_ties) / promotion_games
+        if promotion_games
+        else None
+    )
+    latest_public_checkpoint = (
+        str(Path(batches[-1]["source_checkpoint"]).resolve()) if batches else None
+    )
+    selected_checkpoint_text = str(selected_checkpoint.resolve())
+    return {
+        "schema": "public-showdown-campaign-v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "stop_reason": stop_reason,
+        "stop_win_rate": args.stop_win_rate,
+        "positive_win_rate_reached": positive_reached,
+        "planned_batches": args.batches,
+        "completed_batches": len(batches),
+        "games_per_batch": args.games,
+        "maximum_public_games": args.games * args.batches,
+        "public": {
+            "finished_games": finished,
+            "wins": wins,
+            "losses": losses,
+            "ties": ties,
+            "score": public_score,
+            "win_rate": wins / finished if finished else 0.0,
+            "win_rate_wilson_95": _wilson_interval(wins, finished),
+            "decisions": decisions,
+            "fallbacks": fallbacks,
+            "fallback_rate": fallbacks / decisions if decisions else 0.0,
+            "first_observed_rating": ratings[0] if ratings else None,
+            "last_observed_rating": ratings[-1] if ratings else None,
+            "observed_rating_change": observed_rating_change,
+        },
+        "model_improvement": {
+            "initial_checkpoint": str(initial_checkpoint.resolve()),
+            "selected_checkpoint": selected_checkpoint_text,
+            "latest_public_checkpoint": latest_public_checkpoint,
+            "selected_checkpoint_has_public_batch": (
+                selected_checkpoint_text == latest_public_checkpoint
+            ),
+            "ppo_candidates_trained": len(training),
+            "ppo_candidates_promoted": promoted,
+            "ppo_candidates_rejected": len(training) - promoted,
+            "ppo_updates": sum(int(item.get("updates", 0)) for item in training),
+            "promotion_games": promotion_games,
+            "promotion_wins": promotion_wins,
+            "promotion_losses": sum(int(item["losses"]) for item in promotions),
+            "promotion_ties": promotion_ties,
+            "promotion_score": promotion_score,
+            "first_public_batch_score": batch_scores[0] if batch_scores else None,
+            "latest_public_batch_score": batch_scores[-1] if batch_scores else None,
+            "public_batch_score_change": (
+                batch_scores[-1] - batch_scores[0] if len(batch_scores) > 1 else None
+            ),
+            "checkpoint_chain": [
+                str(initial_checkpoint.resolve()),
+                *[
+                    str(Path(batch["selected_checkpoint_after_batch"]).resolve())
+                    for batch in batches
+                    if (batch.get("league_result") or {}).get("promoted")
+                ],
+            ],
+        },
+        "batch_results": [
+            {
+                "batch": int(batch["batch"]),
+                "source_checkpoint": batch["source_checkpoint"],
+                "selected_checkpoint_after_batch": batch[
+                    "selected_checkpoint_after_batch"
+                ],
+                "wins": int(batch["public"]["wins"]),
+                "losses": int(batch["public"]["losses"]),
+                "ties": int(batch["public"]["ties"]),
+                "score": _result_score(batch["public"]),
+                "positive_win_rate": bool(batch["stop_condition"]["reached"]),
+                "candidate_trained": batch["training"] is not None,
+                "candidate_promoted": bool(
+                    (batch.get("league_result") or {}).get("promoted")
+                ),
+                "promotion_score": (
+                    float(batch["promotion"]["score"])
+                    if batch["promotion"] is not None
+                    else None
+                ),
+            }
+            for batch in batches
+        ],
+    }
+
+
+def _print_campaign_summary(summary: Mapping[str, Any]) -> None:
+    public = summary["public"]
+    improvement = summary["model_improvement"]
+    print(
+        f"[campaign] {public['finished_games']}/{summary['maximum_public_games']} "
+        f"public games | record {public['wins']}-{public['losses']}-{public['ties']} | "
+        f"score {float(public['score']):.1%} | fallbacks {public['fallbacks']}",
+        flush=True,
+    )
+    print(
+        f"[campaign models] PPO candidates {improvement['ppo_candidates_trained']} | "
+        f"promoted {improvement['ppo_candidates_promoted']} | rejected "
+        f"{improvement['ppo_candidates_rejected']} | PPO updates "
+        f"{improvement['ppo_updates']} | stop {summary['stop_reason']}",
+        flush=True,
+    )
+
+
 async def _play_public_batch(
     args: argparse.Namespace,
     *,
@@ -437,6 +595,11 @@ def _validate_args(args: argparse.Namespace, opponent: str | None) -> None:
         raise ValueError("--learn cannot be used with --mode login")
     if args.batches > 1 and not args.learn:
         raise ValueError("Multiple --batches require --learn")
+    if args.stop_win_rate is not None:
+        if not args.learn:
+            raise ValueError("--stop-win-rate requires --learn")
+        if not 0 <= args.stop_win_rate < 1:
+            raise ValueError("--stop-win-rate must be in [0, 1)")
     if args.login_timeout <= 0:
         raise ValueError("--login-timeout must be positive")
     if args.sampling_temperature <= 0:
@@ -560,13 +723,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.learn:
         league = QwenLeague(output_dir / "league.json")
         league.initialize(checkpoint, entry_id="public-initial")
+    initial_checkpoint = checkpoint
     champion_checkpoint = checkpoint
     batches: list[dict[str, Any]] = []
+    stop_reason = "in_progress"
     for batch_number in range(1, args.batches + 1):
         batch_dir = output_dir / f"batch-{batch_number:03d}"
+        batch_dir.mkdir(parents=True, exist_ok=False)
+        source_checkpoint = champion_checkpoint.resolve()
         print(
             f"[batch {batch_number}/{args.batches}] starting public games | "
-            f"checkpoint {champion_checkpoint}",
+            f"checkpoint {source_checkpoint}",
             flush=True,
         )
         public_summary = asyncio.run(
@@ -574,16 +741,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 args,
                 account=public_environment.account,
                 opponent=opponent,
-                checkpoint=champion_checkpoint,
+                checkpoint=source_checkpoint,
                 output_dir=batch_dir / "public",
             )
         )
+        public_score = _result_score(public_summary)
+        previous_score = (
+            _result_score(batches[-1]["public"]) if batches else None
+        )
+        positive_reached = (
+            args.stop_win_rate is not None and public_score > args.stop_win_rate
+        )
         batch_report: dict[str, Any] = {
             "batch": batch_number,
+            "source_checkpoint": str(source_checkpoint),
             "public": public_summary,
+            "public_score": public_score,
+            "public_score_change_from_previous_batch": (
+                public_score - previous_score if previous_score is not None else None
+            ),
+            "stop_condition": {
+                "threshold": args.stop_win_rate,
+                "comparison": "strictly_greater",
+                "reached": positive_reached,
+            },
             "training": None,
+            "training_skipped_reason": None,
             "promotion": None,
             "league_result": None,
+            "model_improvement": None,
         }
         _release_models()
 
@@ -602,6 +788,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError(
                     "Refusing to train on incomplete or empty public trajectories"
                 )
+
+        if args.learn and positive_reached:
+            batch_report["training_skipped_reason"] = "positive_win_rate_reached"
+            print(
+                f"[learn] skipped | public score {public_score:.1%} is above "
+                f"{args.stop_win_rate:.1%}; preserving the checkpoint that reached "
+                "the target",
+                flush=True,
+            )
+        elif args.learn:
             candidate_checkpoint = batch_dir / "candidate"
             print(
                 f"[learn] training PPO candidate | decisions {rollout['decisions']} | "
@@ -609,7 +805,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 flush=True,
             )
             training = train_ppo_rollouts(
-                checkpoint=champion_checkpoint,
+                checkpoint=source_checkpoint,
                 rollout_file=batch_dir / "public" / "rollouts.jsonl",
                 output_dir=candidate_checkpoint,
                 model_name=args.model,
@@ -649,7 +845,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             promotion = _promotion_evaluation(
                 _promotion_args(args),
                 candidate_checkpoint=candidate_checkpoint,
-                champion_checkpoint=champion_checkpoint,
+                champion_checkpoint=source_checkpoint,
                 actor_team=args.team_file,
                 opponent_team=args.team_file,
                 output_dir=batch_dir / "promotion",
@@ -666,6 +862,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             batch_report["league_result"] = league_result
             champion_checkpoint = Path(league.champion["checkpoint"])
+            batch_report["model_improvement"] = {
+                "source_checkpoint": str(source_checkpoint),
+                "candidate_checkpoint": str(candidate_checkpoint.resolve()),
+                "training_source_checkpoint": training.get("source_checkpoint"),
+                "ppo_updates": int(training.get("updates", 0)),
+                "approximate_kl": training.get("approximate_kl"),
+                "ppo_policy_loss": training.get("ppo_policy_loss"),
+                "ppo_value_loss": training.get("ppo_value_loss"),
+                "ppo_total_loss": training.get("ppo_total_loss"),
+                "promotion_wins": int(promotion["wins"]),
+                "promotion_losses": int(promotion["losses"]),
+                "promotion_ties": int(promotion["ties"]),
+                "promotion_score": float(promotion["score"]),
+                "promotion_threshold": args.promotion_threshold,
+                "promoted": bool(league_result["promoted"]),
+            }
             print(
                 f"[promotion] record {promotion['wins']}-{promotion['losses']}-"
                 f"{promotion['ties']} | score {float(promotion['score']):.1%} | "
@@ -674,6 +886,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             _release_models()
 
+        batch_report["selected_checkpoint_after_batch"] = str(
+            champion_checkpoint.resolve()
+        )
         batches.append(batch_report)
         (batch_dir / "batch_summary.json").write_text(
             json.dumps(batch_report, indent=2, sort_keys=True) + "\n",
@@ -682,6 +897,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         (output_dir / "selected_checkpoint.txt").write_text(
             str(champion_checkpoint.resolve()) + "\n", encoding="utf-8"
         )
+        if positive_reached:
+            stop_reason = "positive_win_rate"
+        elif batch_number == args.batches:
+            stop_reason = (
+                "maximum_public_games"
+                if args.stop_win_rate is not None
+                else "completed_requested_batches"
+            )
+        campaign = _campaign_summary(
+            args,
+            batches,
+            initial_checkpoint=initial_checkpoint,
+            selected_checkpoint=champion_checkpoint,
+            stop_reason=stop_reason,
+        )
+        (output_dir / "campaign_summary.json").write_text(
+            json.dumps(campaign, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _print_campaign_summary(campaign)
+        if positive_reached:
+            break
 
     summary = {
         "schema": "public-showdown-run-v1",
@@ -689,6 +926,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "mode": args.mode,
         "learning_enabled": args.learn,
         "batches": batches,
+        "campaign": campaign,
         "selected_checkpoint": str(champion_checkpoint.resolve()),
         "output_dir": str(output_dir),
     }
@@ -712,6 +950,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--opponent")
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--batches", type=int, default=1)
+    parser.add_argument(
+        "--stop-win-rate",
+        type=float,
+        help=(
+            "Stop before another PPO update when a completed public batch's score "
+            "(wins plus half of ties) is strictly above this threshold."
+        ),
+    )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--team-file", type=Path, default=DEFAULT_TEAM)
     parser.add_argument("--battle-format", default="gen9ou")
