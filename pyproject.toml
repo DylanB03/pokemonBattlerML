@@ -35,6 +35,7 @@ pokemon-live-eval = "pokemon_battler.live_eval:main"
 pokemon-public-play = "pokemon_battler.public_play:main"
 pokemon-win-train = "pokemon_battler.win_experiment:main"
 pokemon-distill = "pokemon_battler.distill:main"
+pokemon-teacher-collect = "pokemon_battler.teacher_collect:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

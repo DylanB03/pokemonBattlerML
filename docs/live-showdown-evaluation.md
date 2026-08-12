@@ -88,10 +88,10 @@ they do not reimplement their choice rules in this repository. The exact source
 revisions are pinned and written into each summary:
 
 When Foul Play is selected, the report directory also contains
-`foul_play_teacher.jsonl`. This is the MCTS policy-distillation dataset from
-Foul Play's decisions in those games. It does not change the live evaluation or
-load another Qwen model. See [Foul Play policy distillation](foul-play-distillation.md)
-for the schema and training command.
+`foul_play_teacher.jsonl`. This is an opponent-perspective diagnostic trace:
+Foul Play controls the opposing team in this benchmark, so do not use it as the
+fixed-team model's main distillation dataset. The dedicated collector reverses
+the roles correctly. See [Foul Play policy distillation](foul-play-distillation.md).
 
 | Opponent | Source revision | License | Runtime behavior |
 | --- | --- | --- | --- |
@@ -168,7 +168,8 @@ Each run gets a new `reports/live/<timestamp>/` directory:
   distribution, selected order, auxiliary value estimate, latency, and
   fallback reason;
 - `foul_play_teacher.jsonl`, for Foul Play runs, records its unfiltered MCTS
-  visit distribution and the matching public observation for distillation;
+  visit distribution and matching public observation from the opponent's
+  perspective;
 - `replays/` contains Showdown replay logs;
 - `summary.json` contains wins, losses, ties, the raw win rate, a 95% Wilson
   interval, decision and fallback counts, latency statistics, and per-battle

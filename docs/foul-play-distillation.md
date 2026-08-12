@@ -22,10 +22,23 @@ stable indices are necessary to align a Foul Play choice such as `stealthrock`,
 that the interaction head scores. They are labels in the data, not language the
 model must learn to emit.
 
+## Fixed-team perspective
+
+The teacher must make decisions from the model's deployment perspective. Foul
+Play therefore controls the model's one fixed team during collection. Its
+opponent receives a different team from a shuffled OU pool before every battle.
+Randomizing Foul Play's own team would be backwards: the resulting examples
+would teach Qwen as though its own roster changed while the enemy stayed fixed.
+
+The dedicated collection command requires at least two distinct enemy team
+files. It samples without replacement within shuffled cycles and prevents the
+same team from appearing on both sides of a cycle boundary. The fixed team file
+is never placed in that pool implicitly.
+
 ## What is collected
 
-Every local evaluation against `foul-play` now also writes
-`foul_play_teacher.jsonl` in its report directory. Each decision contains:
+`pokemon_battler.teacher_collect` writes `foul_play_teacher.jsonl` in its output
+directory. Each decision contains:
 
 - the public battle observation from Foul Play's side;
 - player and opponent rosters plus recent transitions;
@@ -45,23 +58,36 @@ not copied into the student's input.
 
 ## Collect teacher games
 
-Run this after the current public campaign is finished. It launches the pinned
-Foul Play checkout on the local Showdown server and does not affect public ELO:
+First save multiple valid Gen 9 OU Showdown exports in an enemy-team directory.
+Use different compositions and archetypes, not reordered copies of one team.
+Smogon's maintained [SV OU sample teams](https://www.smogon.com/forums/threads/sv-ou-sample-teams.3712513/)
+are one suitable source.
+
+Then run this after the current public campaign is finished. It launches the
+pinned Foul Play checkout on the local Showdown server, keeps the model team
+fixed, and does not affect public ELO or load Qwen:
 
 ```bash
-python -m pokemon_battler.live_eval \
-  --checkpoint outputs/your-current-checkpoint \
-  --opponent foul-play \
+python -m pokemon_battler.teacher_collect \
+  --team-file examples/teams/gen9ou-balance.txt \
+  --enemy-team-dir data/teams/gen9ou-enemies \
   --games 100 \
   --foul-play-search-time-ms 250 \
   --output-dir reports/teacher/foul-play-001
 ```
 
-The normal result is saved to `summary.json`; `teacher_examples` reports how many
-usable decisions were collected. More search time generally produces a better
-teacher target but makes collection proportionally slower. The old 100 ms value
-is appropriate for a quick integration check. Prefer 250-500 ms for a dataset
-that will actually train a checkpoint.
+`summary.json` explicitly records `teacher_team_fixed: true` and
+`enemy_teams_randomized: true`. `enemy_team_selections.json` records the exact
+team used in each battle, its result, the selection order, and per-team counts,
+while `teacher_examples` reports how many usable decisions were collected. More
+search time generally produces a better teacher target but makes collection
+proportionally slower. Prefer 250-500 ms for a dataset that will actually train
+a checkpoint.
+
+Individual enemy files can be supplied instead of a directory by repeating
+`--enemy-team-file`. Collection parses the exports and fails before starting
+Showdown if fewer than two distinct species compositions resolve; reordered
+copies of one team do not count as diversity.
 
 Multiple runs can be joined before training:
 

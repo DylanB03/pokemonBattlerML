@@ -75,9 +75,10 @@ is a fixed-team fixture, not a broad team-pool evaluation. See
 [Local Showdown evaluation](docs/live-showdown-evaluation.md) for setup, state
 conversion, exact benchmark results, failure handling, and CLI controls.
 
-Foul Play can also act as an offline MCTS teacher. Local evaluations against it
-save the complete legal-action visit distribution, and `pokemon-distill` fits a
-new Qwen interaction checkpoint without overwriting the source model. See
+Foul Play can also act as an offline MCTS teacher. `pokemon-teacher-collect`
+keeps the deployment team fixed while cycling through a randomized enemy OU
+team pool, and `pokemon-distill` fits a new Qwen interaction checkpoint without
+overwriting the source model. See
 [Foul Play policy distillation](docs/foul-play-distillation.md).
 
 On the completed 20-game fixed-team samples, the checkpoint scored 20–0 against
