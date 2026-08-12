@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
@@ -27,6 +29,41 @@ from pokemon_battler.modeling import (
     load_training_metadata,
 )
 from pokemon_battler.training_data import InteractionInferenceCollator
+
+
+_HTML_TAG = re.compile(r"<[^>]*>")
+_RATING_UPDATE = re.compile(
+    r"^(?P<username>.+?)'s rating:\s*(?P<before>\d+)\s*"
+    r"(?:→|->)\s*(?P<after>\d+)\s*"
+    r"\((?P<change>[+-]\d+)\s+for\s+"
+    r"(?P<result>winning|losing|tying)\)\s*$"
+)
+
+
+def _showdown_id(value: str) -> str:
+    return "".join(character for character in value.lower() if character.isalnum())
+
+
+def parse_showdown_rating_update(
+    raw_message: str,
+    *,
+    username: str,
+) -> dict[str, Any] | None:
+    """Parse this player's exact old-to-new ELO transition from a ladder result."""
+    plain_text = _HTML_TAG.sub("", unescape(raw_message)).strip()
+    match = _RATING_UPDATE.fullmatch(plain_text)
+    if match is None or _showdown_id(match.group("username")) != _showdown_id(username):
+        return None
+    before = int(match.group("before"))
+    after = int(match.group("after"))
+    # Derive the delta from the two authoritative displayed ratings. This also
+    # protects the summary if Showdown ever changes the explanatory text.
+    return {
+        "before": before,
+        "after": after,
+        "change": after - before,
+        "result": match.group("result"),
+    }
 
 
 @dataclass(frozen=True)
@@ -236,6 +273,7 @@ class InteractionPlayer(Player):
         self.team_preview_policy = team_preview_policy
         self.decision_callback = decision_callback
         self.trackers: dict[str, LiveBattleTracker] = {}
+        self.rating_updates: dict[str, dict[str, Any]] = {}
         self.decision_count = 0
         self.fallback_count = 0
         self.inference_latencies: list[float] = []
@@ -245,6 +283,28 @@ class InteractionPlayer(Player):
         if self.team_preview_policy == "random":
             return self.random_teampreview(battle)
         return deterministic_teampreview(battle)
+
+    def _capture_rating_updates(self, split_messages: list[list[str]]) -> None:
+        if not split_messages or not split_messages[0]:
+            return
+        battle_id = split_messages[0][0].removeprefix(">")
+        for split_message in split_messages[1:]:
+            if len(split_message) < 3 or split_message[1] != "raw":
+                continue
+            update = parse_showdown_rating_update(
+                "|".join(split_message[2:]),
+                username=self.username,
+            )
+            if update is not None:
+                self.rating_updates[battle_id] = update
+
+    async def _handle_battle_message(self, split_messages: list[list[str]]) -> None:
+        # poke-env marks the game complete as soon as it reads |win|/|tie|, but
+        # Showdown's exact old -> new rating line follows later in the same
+        # message. Capture the whole message first so closing a finished batch
+        # cannot race and lose the final game's ELO update.
+        self._capture_rating_updates(split_messages)
+        await super()._handle_battle_message(split_messages)
 
     def _write_decision(
         self,
@@ -339,6 +399,7 @@ class InteractionPlayer(Player):
         return order
 
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
+        rating_update = getattr(self, "rating_updates", {}).get(battle.battle_tag)
         if self.decision_callback is not None:
             self.decision_callback(
                 {
@@ -350,6 +411,7 @@ class InteractionPlayer(Player):
                     "turns": battle.turn,
                     "rating": battle.rating,
                     "opponent_rating": battle.opponent_rating,
+                    "rating_update": rating_update,
                 }
             )
         if self.trace_writer is not None:
@@ -363,5 +425,6 @@ class InteractionPlayer(Player):
                     "turns": battle.turn,
                     "rating": battle.rating,
                     "opponent_rating": battle.opponent_rating,
+                    "rating_update": rating_update,
                 }
             )

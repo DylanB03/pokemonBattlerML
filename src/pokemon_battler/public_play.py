@@ -37,7 +37,7 @@ from pokemon_battler.rl_training import train_ppo_rollouts
 from pokemon_battler.win_experiment import _promotion_evaluation
 
 
-PUBLIC_SCHEMA = "public-showdown-session-v1"
+PUBLIC_SCHEMA = "public-showdown-session-v2"
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_CHECKPOINT_POINTER = Path("outputs/qwen-win-pilot-1/selected_checkpoint.txt")
 USERNAME_KEY = "POKEMON_SHOWDOWN_USERNAME"
@@ -82,11 +82,18 @@ class PublicBattleProgress:
         opponent = event.get("opponent") or "unknown opponent"
         turns = event.get("turns")
         turn_text = f" | turns {turns}" if turns is not None else ""
+        rating_update = event.get("rating_update")
+        rating_text = (
+            f" | ELO {rating_update['before']}->{rating_update['after']} "
+            f"({int(rating_update['change']):+d})"
+            if rating_update is not None
+            else ""
+        )
         win_rate = self.wins / self.completed_games
         print(
             f"[public {self.completed_games}/{self.requested_games}] {result} "
             f"vs {opponent} | record {self.wins}-{self.losses}-{self.ties} | "
-            f"win rate {win_rate:.1%}{turn_text}",
+            f"win rate {win_rate:.1%}{turn_text}{rating_text}",
             flush=True,
         )
 
@@ -212,6 +219,55 @@ async def _run_matchmaking(
     await operation
 
 
+def _rating_summary(battles: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    finished_games = sum(bool(battle.get("finished")) for battle in battles)
+    updates = [
+        battle["rating_update"]
+        for battle in battles
+        if battle.get("finished") and battle.get("rating_update") is not None
+    ]
+    changes = [int(update["change"]) for update in updates]
+    rated_wins = sum(update.get("result") == "winning" for update in updates)
+    rated_losses = sum(update.get("result") == "losing" for update in updates)
+    rated_ties = sum(update.get("result") == "tying" for update in updates)
+    ratings = [
+        rating
+        for update in updates
+        for rating in (int(update["before"]), int(update["after"]))
+    ]
+    start_elo = int(updates[0]["before"]) if updates else None
+    end_elo = int(updates[-1]["after"]) if updates else None
+    tracked_net_change = sum(changes)
+    start_to_end_change = (
+        end_elo - start_elo
+        if start_elo is not None and end_elo is not None
+        else None
+    )
+    return {
+        "available": bool(updates),
+        "rated_games": len(updates),
+        "missing_finished_games": finished_games - len(updates),
+        "complete": len(updates) == finished_games,
+        "wins": rated_wins,
+        "losses": rated_losses,
+        "ties": rated_ties,
+        "win_rate": rated_wins / len(updates) if updates else None,
+        "start_elo": start_elo,
+        "end_elo": end_elo,
+        "net_change": tracked_net_change if updates else None,
+        "start_to_end_change": start_to_end_change,
+        "untracked_change": (
+            start_to_end_change - tracked_net_change
+            if start_to_end_change is not None
+            else None
+        ),
+        "elo_gained": sum(change for change in changes if change > 0),
+        "elo_lost": sum(change for change in changes if change < 0),
+        "peak_elo": max(ratings) if ratings else None,
+        "minimum_elo": min(ratings) if ratings else None,
+    }
+
+
 def _public_summary(
     args: argparse.Namespace,
     *,
@@ -225,6 +281,23 @@ def _public_summary(
     wins = sum(battle.won is True for battle in finished_battles)
     losses = sum(battle.lost is True for battle in finished_battles)
     ties = len(finished_battles) - wins - losses
+    rating_updates = getattr(player, "rating_updates", {})
+    battle_results = [
+        {
+            "battle_id": battle.battle_tag,
+            "finished": battle.finished,
+            "won": battle.won,
+            "lost": battle.lost,
+            "turns": battle.turn,
+            "opponent": battle.opponent_username,
+            # poke-env exposes the pre-battle ladder rating here. The exact
+            # Showdown old -> new transition is stored separately below.
+            "rating": battle.rating,
+            "opponent_rating": battle.opponent_rating,
+            "rating_update": rating_updates.get(battle.battle_tag),
+        }
+        for battle in battles
+    ]
     return {
         "schema": PUBLIC_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -242,6 +315,7 @@ def _public_summary(
         "ties": ties,
         "win_rate": wins / len(finished_battles) if finished_battles else None,
         "win_rate_wilson_95": _wilson_interval(wins, len(finished_battles)),
+        "rating": _rating_summary(battle_results),
         "decisions": player.decision_count,
         "fallbacks": player.fallback_count,
         "fallback_rate": (
@@ -255,19 +329,7 @@ def _public_summary(
         "inference_latency_seconds": _latency_summary(player.inference_latencies),
         "rollout": rollout,
         "error": error,
-        "battles": [
-            {
-                "battle_id": battle.battle_tag,
-                "finished": battle.finished,
-                "won": battle.won,
-                "lost": battle.lost,
-                "turns": battle.turn,
-                "opponent": battle.opponent_username,
-                "rating": battle.rating,
-                "opponent_rating": battle.opponent_rating,
-            }
-            for battle in battles
-        ],
+        "battles": battle_results,
     }
 
 
@@ -284,6 +346,22 @@ def _print_public_summary(summary: Mapping[str, Any]) -> None:
         f"fallbacks {summary['fallbacks']} | unfinished {summary['unfinished_games']}",
         flush=True,
     )
+    rating = summary.get("rating") or {}
+    if rating.get("available"):
+        print(
+            f"[public ELO] {rating['start_elo']} -> {rating['end_elo']} | "
+            f"net {int(rating['net_change']):+d} | gained "
+            f"{int(rating['elo_gained']):+d} | lost {int(rating['elo_lost']):+d} | "
+            f"peak {rating['peak_elo']} | low {rating['minimum_elo']} | "
+            f"rated games {rating['rated_games']}/{finished}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[public ELO] unavailable | rated updates 0/{finished} "
+            "(challenge games may be unrated)",
+            flush=True,
+        )
 
 
 def _format_duration(seconds: float) -> str:
@@ -319,12 +397,9 @@ def _campaign_summary(
     ties = sum(int(item["ties"]) for item in public)
     decisions = sum(int(item["decisions"]) for item in public)
     fallbacks = sum(int(item["fallbacks"]) for item in public)
-    ratings = [
-        float(battle["rating"])
-        for item in public
-        for battle in item.get("battles", [])
-        if battle.get("finished") and battle.get("rating") is not None
-    ]
+    rating = _rating_summary(
+        [battle for item in public for battle in item.get("battles", [])]
+    )
     promotions = [
         batch["promotion"] for batch in batches if batch.get("promotion") is not None
     ]
@@ -344,7 +419,6 @@ def _campaign_summary(
     promoted = sum(
         bool((batch.get("league_result") or {}).get("promoted")) for batch in batches
     )
-    observed_rating_change = ratings[-1] - ratings[0] if ratings else None
     public_score = (wins + 0.5 * ties) / finished if finished else 0.0
     promotion_score = (
         (promotion_wins + 0.5 * promotion_ties) / promotion_games
@@ -356,7 +430,7 @@ def _campaign_summary(
     )
     selected_checkpoint_text = str(selected_checkpoint.resolve())
     return {
-        "schema": "public-showdown-campaign-v1",
+        "schema": "public-showdown-campaign-v2",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "stop_reason": stop_reason,
         "stop_win_rate": args.stop_win_rate,
@@ -376,9 +450,7 @@ def _campaign_summary(
             "decisions": decisions,
             "fallbacks": fallbacks,
             "fallback_rate": fallbacks / decisions if decisions else 0.0,
-            "first_observed_rating": ratings[0] if ratings else None,
-            "last_observed_rating": ratings[-1] if ratings else None,
-            "observed_rating_change": observed_rating_change,
+            "rating": rating,
         },
         "model_improvement": {
             "initial_checkpoint": str(initial_checkpoint.resolve()),
@@ -421,6 +493,7 @@ def _campaign_summary(
                 "losses": int(batch["public"]["losses"]),
                 "ties": int(batch["public"]["ties"]),
                 "score": _result_score(batch["public"]),
+                "rating": batch["public"].get("rating"),
                 "positive_win_rate": bool(batch["stop_condition"]["reached"]),
                 "candidate_trained": batch["training"] is not None,
                 "candidate_promoted": bool(
@@ -446,6 +519,16 @@ def _print_campaign_summary(summary: Mapping[str, Any]) -> None:
         f"score {float(public['score']):.1%} | fallbacks {public['fallbacks']}",
         flush=True,
     )
+    rating = public.get("rating") or {}
+    if rating.get("available"):
+        print(
+            f"[campaign ELO] {rating['start_elo']} -> {rating['end_elo']} | "
+            f"bot-game net {int(rating['net_change']):+d} | gained "
+            f"{int(rating['elo_gained']):+d} | lost {int(rating['elo_lost']):+d} | "
+            f"peak {rating['peak_elo']} | low {rating['minimum_elo']} | "
+            f"rated games {rating['rated_games']}/{public['finished_games']}",
+            flush=True,
+        )
     print(
         f"[campaign models] PPO candidates {improvement['ppo_candidates_trained']} | "
         f"promoted {improvement['ppo_candidates_promoted']} | rejected "

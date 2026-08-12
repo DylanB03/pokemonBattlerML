@@ -74,9 +74,13 @@ class PublicPlayTests(unittest.TestCase):
                 }
             )
         self.assertEqual(
-            terminal.getvalue().strip(),
-            "[public summary] completed 4/5 | record 2-1-1 | win rate 50.0% | "
-            "fallbacks 0 | unfinished 1",
+            terminal.getvalue().strip().splitlines(),
+            [
+                "[public summary] completed 4/5 | record 2-1-1 | win rate 50.0% | "
+                "fallbacks 0 | unfinished 1",
+                "[public ELO] unavailable | rated updates 0/4 "
+                "(challenge games may be unrated)",
+            ],
         )
         self.assertEqual(_format_duration(941.9), "15m 42s")
 
@@ -190,6 +194,20 @@ class PublicPlayTests(unittest.TestCase):
             decision_count=10,
             fallback_count=0,
             inference_latencies=[],
+            rating_updates={
+                "battle-win": {
+                    "before": 1010,
+                    "after": 1040,
+                    "change": 30,
+                    "result": "winning",
+                },
+                "battle-loss": {
+                    "before": 1040,
+                    "after": 1018,
+                    "change": -22,
+                    "result": "losing",
+                },
+            },
         )
         args = SimpleNamespace(
             mode="ladder",
@@ -215,6 +233,15 @@ class PublicPlayTests(unittest.TestCase):
         self.assertEqual(summary["ties"], 0)
         self.assertEqual(summary["win_rate"], 0.5)
         self.assertFalse(summary["battles"][-1]["finished"])
+        self.assertEqual(summary["rating"]["rated_games"], 2)
+        self.assertEqual(summary["rating"]["start_elo"], 1010)
+        self.assertEqual(summary["rating"]["end_elo"], 1018)
+        self.assertEqual(summary["rating"]["net_change"], 8)
+        self.assertEqual(summary["rating"]["elo_gained"], 30)
+        self.assertEqual(summary["rating"]["elo_lost"], -22)
+        self.assertEqual(summary["rating"]["peak_elo"], 1040)
+        self.assertEqual(summary["rating"]["minimum_elo"], 1010)
+        self.assertTrue(summary["rating"]["complete"])
 
     def test_login_artifacts_never_contain_the_password(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -8,7 +8,10 @@ from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
 from pokemon_battler.interaction_features import validate_interaction_observation
 from pokemon_battler.live_eval import DEFAULT_TEAM, build_parser
-from pokemon_battler.live_policy import InteractionPlayer
+from pokemon_battler.live_policy import (
+    InteractionPlayer,
+    parse_showdown_rating_update,
+)
 from pokemon_battler.live_state import (
     LiveBattleTracker,
     battle_to_metamon_state,
@@ -162,9 +165,66 @@ class LivePolicyTests(unittest.TestCase):
                     "turns": 19,
                     "rating": 1100,
                     "opponent_rating": 1080,
+                    "rating_update": None,
                 }
             ],
         )
+
+    def test_showdown_rating_update_parser_reads_exact_ladder_transition(self) -> None:
+        update = parse_showdown_rating_update(
+            "ATSskipper5's rating: 1074 &rarr; "
+            "<strong>1100</strong><br />(+26 for winning)",
+            username="ats skipper 5",
+        )
+        self.assertEqual(
+            update,
+            {
+                "before": 1074,
+                "after": 1100,
+                "change": 26,
+                "result": "winning",
+            },
+        )
+        self.assertIsNone(
+            parse_showdown_rating_update(
+                "Opponent's rating: 1100 &rarr; <strong>1074</strong>"
+                "<br />(-26 for losing)",
+                username="ATSskipper5",
+            )
+        )
+
+    def test_rating_update_is_attached_to_finished_battle_event(self) -> None:
+        events = []
+        player = object.__new__(InteractionPlayer)
+        player.ps_client = SimpleNamespace(username="ATSskipper5")
+        player.rating_updates = {}
+        player.decision_callback = events.append
+        player.trace_writer = None
+        raw_messages = [
+            [">battle-gen9ou-123"],
+            ["", "win", "ATSskipper5"],
+            [
+                "",
+                "raw",
+                "ATSskipper5's rating: 1090 &rarr; "
+                "<strong>1112</strong><br />(+22 for winning)",
+            ],
+        ]
+        player._capture_rating_updates(raw_messages)
+        battle = SimpleNamespace(
+            battle_tag="battle-gen9ou-123",
+            won=True,
+            lost=False,
+            opponent_username="Opponent",
+            turn=12,
+            rating=1090,
+            opponent_rating=1100,
+        )
+
+        player._battle_finished_callback(battle)
+
+        self.assertEqual(events[0]["rating_update"]["after"], 1112)
+        self.assertEqual(events[0]["rating_update"]["change"], 22)
 
     def test_public_preview_policy_can_randomize_the_lead(self) -> None:
         player = object.__new__(InteractionPlayer)

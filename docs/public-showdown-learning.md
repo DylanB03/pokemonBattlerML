@@ -68,12 +68,15 @@ when the run takes several hours. `--login-timeout` applies only while initially
 authenticating, before matchmaking begins; it can never terminate a battle.
 
 Every completed game immediately prints its result, opponent, turn count,
-cumulative win-loss-tie record, and win rate. The end of each public batch
-prints the same compact record plus fallbacks and unfinished games. Learning
-runs also announce the start and completion of PPO training, its update count,
-approximate KL and duration, followed by the candidate-versus-champion result
-and promotion decision. The full machine-readable details remain in the JSON
-artifacts rather than flooding the terminal.
+cumulative win-loss-tie record, win rate, and the exact old-to-new ELO change
+when Showdown marks the game as rated. The end of each public batch prints the
+same compact record plus an ELO line with the starting rating, ending rating,
+net change from the bot's games, total points gained, total points lost, peak,
+minimum, and number of captured rated games. Learning runs also announce the
+start and completion of PPO training, its update count, approximate KL and
+duration, followed by the candidate-versus-champion result and promotion
+decision. The full machine-readable details remain in the JSON artifacts
+rather than flooding the terminal.
 
 The default checkpoint is read from:
 
@@ -152,10 +155,20 @@ played a subsequent public batch.
 Each `batch-NNN/batch_summary.json` contains that batch's public result, PPO
 metrics, source and candidate checkpoints, promotion match, and selection
 decision. `campaign_summary.json` is rewritten after every completed batch and
-aggregates the public record, observed rating change, fallbacks, candidate
+aggregates the public record, exact tracked ELO changes, fallbacks, candidate
 counts, PPO updates, promotion record, public score change, and complete
-promoted-checkpoint chain. `summary.json` embeds both the individual reports
-and the final campaign summary.
+promoted-checkpoint chain. Each item in `batch_results` includes its own rating
+summary, so a 100-game suite can be compared directly by record, win rate, and
+ELO outcome. `summary.json` embeds both the individual reports and the final
+campaign summary.
+
+The rating summary is based on Showdown's authoritative result line for every
+rated battle (`old rating -> new rating`), not an estimated K-factor and not
+poke-env's pre-battle `battle.rating` value. `net_change` sums only changes from
+captured bot games. `start_to_end_change` is also saved; `untracked_change`
+exposes any difference between those values, such as ladder movement from games
+played on the account outside the campaign. Unrated challenge suites still
+report their win-loss record and win rate, with ELO marked unavailable.
 
 ## Artifacts
 
