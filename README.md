@@ -76,8 +76,11 @@ is a fixed-team fixture, not a broad team-pool evaluation. See
 conversion, exact benchmark results, failure handling, and CLI controls.
 
 Foul Play can also act as an offline MCTS teacher. `pokemon-teacher-collect`
-keeps the deployment team fixed while cycling through a randomized enemy OU
-team pool, and `pokemon-distill` fits a new Qwen interaction checkpoint without
+now runs fixed-team Foul Play against a second Foul Play agent while cycling the
+opponent through a randomized, prevalidated OU team pool. This keeps both the
+soft labels and visited-state distribution search-backed. It prints progress
+after every game and fails stalled or illegal-team collections explicitly.
+`pokemon-distill` then fits a new Qwen interaction checkpoint without
 overwriting the source model. See
 [Foul Play policy distillation](docs/foul-play-distillation.md).
 

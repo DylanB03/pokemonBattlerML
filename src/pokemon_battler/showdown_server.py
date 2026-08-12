@@ -87,6 +87,10 @@ class LocalShowdownServer:
         if not config.exists() and example.is_file():
             shutil.copyfile(example, config)
 
+    def prepare(self) -> None:
+        """Ensure the official server and validator are available without starting it."""
+        self._install()
+
     def __enter__(self) -> LocalShowdownServer:
         if _port_is_open("127.0.0.1", self.port):
             self.reused_existing_server = True

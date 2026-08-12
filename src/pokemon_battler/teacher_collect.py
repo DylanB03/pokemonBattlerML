@@ -4,6 +4,10 @@ import argparse
 import asyncio
 import json
 import random
+import re
+import shutil
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -28,11 +32,15 @@ from pokemon_battler.team_pool import ShuffledTeamPool, resolve_team_pool
 
 TEACHER_USERNAME = "PBFoulPlay"
 ENEMY_USERNAME = "PBTeacherEnemy"
+FOUL_PLAY_ENEMY_USERNAME = "PBFoulPlayEnemy"
 ENEMY_POLICIES = {
     "random": RandomPlayer,
     "max-power": MaxBasePowerPlayer,
     "heuristic": SimpleHeuristicsPlayer,
 }
+ENEMY_POLICY_NAMES = ("foul-play", *ENEMY_POLICIES)
+_FOUL_PLAY_WINNER = re.compile(r"^INFO\s+Winner:\s*(.+?)\s*$", re.MULTILINE)
+_FOUL_PLAY_RECORD = re.compile(r"^INFO\s+W:\s*(\d+)\s+L:\s*(\d+)\s*$", re.MULTILINE)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enemy-team-file", type=Path, action="append", default=[])
     parser.add_argument("--enemy-team-dir", type=Path)
     parser.add_argument(
-        "--enemy-policy", choices=tuple(ENEMY_POLICIES), default="heuristic"
+        "--enemy-policy", choices=ENEMY_POLICY_NAMES, default="foul-play"
     )
     parser.add_argument("--games", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
@@ -62,8 +70,83 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foul-play-search-time-ms", type=int, default=250)
     parser.add_argument("--foul-play-parallelism", type=int, default=1)
     parser.add_argument("--foul-play-search-threads", type=int, default=1)
+    parser.add_argument(
+        "--enemy-foul-play-search-time-ms",
+        type=int,
+        help="Enemy Foul Play search budget; defaults to the teacher's budget.",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between smart-vs-smart progress checks.",
+    )
+    parser.add_argument(
+        "--battle-stall-timeout",
+        type=float,
+        default=600.0,
+        help="Fail if neither Foul Play log changes for this many seconds.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser
+
+
+def _validate_showdown_teams(
+    showdown_dir: Path,
+    battle_format: str,
+    team_files: Sequence[Path],
+) -> None:
+    """Reject obsolete or otherwise illegal teams before a challenge can hang."""
+    node = shutil.which("node")
+    executable = showdown_dir.resolve() / "pokemon-showdown"
+    if node is None or not executable.is_file():
+        raise FileNotFoundError(
+            "Team legality preflight requires Node.js and the local Pokémon "
+            f"Showdown checkout at {showdown_dir}"
+        )
+    failures: list[str] = []
+    for team_file in team_files:
+        result = subprocess.run(
+            [node, str(executable), "validate-team", battle_format],
+            cwd=showdown_dir,
+            input=team_file.read_text(encoding="utf-8"),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            reason = (result.stderr or result.stdout).strip() or "validation failed"
+            failures.append(f"{team_file}: {reason}")
+    if failures:
+        raise ValueError(
+            "Showdown rejected these team files before collection:\n- "
+            + "\n- ".join(failures)
+        )
+
+
+def _foul_play_winners(log_path: Path) -> list[str]:
+    if not log_path.is_file():
+        return []
+    return _FOUL_PLAY_WINNER.findall(log_path.read_text(encoding="utf-8"))
+
+
+def _latest_foul_play_record(log_path: Path) -> tuple[int, int]:
+    if not log_path.is_file():
+        return 0, 0
+    with log_path.open("rb") as stream:
+        stream.seek(0, 2)
+        size = stream.tell()
+        stream.seek(max(0, size - 65536))
+        tail = stream.read().decode("utf-8", errors="replace")
+    matches = _FOUL_PLAY_RECORD.findall(tail)
+    if not matches:
+        return 0, 0
+    wins, losses = matches[-1]
+    return int(wins), int(losses)
+
+
+def _file_modified_at(path: Path) -> float:
+    return path.stat().st_mtime if path.is_file() else 0.0
 
 
 async def _collect(
@@ -165,6 +248,112 @@ async def _collect(
         await close_poke_env_clients(enemy.ps_client)
 
 
+def _enemy_schedule(
+    enemy_team_files: Sequence[Path],
+    *,
+    games: int,
+    seed: int,
+) -> tuple[list[Path], dict[str, Any]]:
+    pool = ShuffledTeamPool(enemy_team_files, seed=seed)
+    schedule: list[Path] = []
+    for _ in range(games):
+        pool.yield_team()
+        schedule.append(Path(pool.selections[-1]["team_file"]))
+    return schedule, pool.report()
+
+
+def _collect_foul_play_vs_foul_play(
+    args: argparse.Namespace,
+    output_dir: Path,
+    teacher: ExternalOpponentProcess,
+    enemy: ExternalOpponentProcess,
+    pool_report: dict[str, Any],
+) -> dict[str, Any]:
+    teacher.start()
+    enemy.start()
+    last_completed = -1
+    last_activity = time.monotonic()
+    last_log_times = (0.0, 0.0)
+    while True:
+        teacher_wins, enemy_wins = _latest_foul_play_record(teacher.log_path)
+        completed = teacher_wins + enemy_wins
+        log_times = (
+            _file_modified_at(teacher.log_path),
+            _file_modified_at(enemy.log_path),
+        )
+        if log_times != last_log_times:
+            last_activity = time.monotonic()
+            last_log_times = log_times
+        if completed != last_completed:
+            print(
+                f"[teacher {completed}/{args.games}] Foul Play vs Foul Play | "
+                f"fixed-team teacher {teacher_wins}-{enemy_wins}",
+                flush=True,
+            )
+            last_completed = completed
+        teacher_done = teacher.process is not None and teacher.process.poll() is not None
+        enemy_done = enemy.process is not None and enemy.process.poll() is not None
+        if teacher_done or enemy_done:
+            teacher.ensure_success()
+            enemy.ensure_success()
+            break
+        if time.monotonic() - last_activity > args.battle_stall_timeout:
+            raise TimeoutError(
+                "Foul Play vs Foul Play made no log progress for "
+                f"{args.battle_stall_timeout:g} seconds; inspect "
+                f"{teacher.log_path} and {enemy.log_path}"
+            )
+        time.sleep(args.progress_interval)
+
+    winners = _foul_play_winners(teacher.log_path)
+    if len(winners) != args.games:
+        raise RuntimeError(
+            f"Teacher recorded {len(winners)} finished games, expected {args.games}"
+        )
+    teacher_wins = sum(winner == TEACHER_USERNAME for winner in winners)
+    enemy_wins = sum(winner == FOUL_PLAY_ENEMY_USERNAME for winner in winners)
+    ties = len(winners) - teacher_wins - enemy_wins
+    trace_path = teacher.teacher_trace_path
+    with trace_path.open(encoding="utf-8") as stream:
+        teacher_examples = sum(1 for line in stream if line.strip())
+    selections = list(pool_report["selections"])
+    for index, selection in enumerate(selections):
+        winner = winners[index]
+        selection["result"] = (
+            "teacher-win"
+            if winner == TEACHER_USERNAME
+            else "enemy-win"
+            if winner == FOUL_PLAY_ENEMY_USERNAME
+            else "tie"
+        )
+    pool_report["selections"] = selections
+    (output_dir / "enemy_team_selections.json").write_text(
+        json.dumps(pool_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "schema": "fixed-team-foul-play-teacher-v2",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "battle_format": args.battle_format,
+        "teacher": teacher.metadata(),
+        "teacher_team_file": str(args.team_file.resolve()),
+        "teacher_team_fixed": True,
+        "enemy": enemy.metadata(),
+        "enemy_policy": "foul-play",
+        "enemy_teams_randomized": True,
+        "enemy_team_pool": pool_report,
+        "requested_games": args.games,
+        "finished_games": len(winners),
+        "teacher_wins": teacher_wins,
+        "enemy_wins": enemy_wins,
+        "ties": ties,
+        "teacher_win_rate": teacher_wins / len(winners) if winners else None,
+        "teacher_win_rate_wilson_95": _wilson_interval(teacher_wins, len(winners)),
+        "teacher_examples": teacher_examples,
+        "teacher_trace": str(trace_path),
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.games <= 0:
         raise ValueError("--games must be positive")
@@ -176,7 +365,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "--foul-play-search-time-ms": args.foul_play_search_time_ms,
         "--foul-play-parallelism": args.foul_play_parallelism,
         "--foul-play-search-threads": args.foul_play_search_threads,
+        "--progress-interval": args.progress_interval,
+        "--battle-stall-timeout": args.battle_stall_timeout,
     }
+    if args.enemy_foul_play_search_time_ms is not None:
+        positive_search["--enemy-foul-play-search-time-ms"] = (
+            args.enemy_foul_play_search_time_ms
+        )
     invalid = [name for name, value in positive_search.items() if value <= 0]
     if invalid:
         raise ValueError(f"These arguments must be positive: {', '.join(invalid)}")
@@ -188,6 +383,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.enemy_team_file,
         args.enemy_team_dir,
         minimum_teams=2,
+    )
+    server = LocalShowdownServer(
+        args.showdown_dir,
+        port=args.server_port,
+        bootstrap=not args.no_bootstrap_server,
+        startup_timeout=args.server_startup_timeout,
+        log_path=args.output_dir / "showdown.log",
+        stop_on_exit=not args.keep_server,
+    )
+    server.prepare()
+    _validate_showdown_teams(
+        args.showdown_dir,
+        args.battle_format,
+        [args.team_file, *enemy_team_files],
     )
     enemy_pool = ShuffledTeamPool(enemy_team_files, seed=args.seed)
     random.seed(args.seed)
@@ -219,22 +428,58 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         server_port=args.server_port,
         bootstrap=not args.no_bootstrap_opponents,
         startup_timeout=args.opponent_startup_timeout,
-        challenger=ENEMY_USERNAME,
+        challenger=(
+            FOUL_PLAY_ENEMY_USERNAME
+            if args.enemy_policy == "foul-play"
+            else ENEMY_USERNAME
+        ),
         foul_play_search_time_ms=args.foul_play_search_time_ms,
         foul_play_parallelism=args.foul_play_parallelism,
         foul_play_search_threads=args.foul_play_search_threads,
     )
     manager.prepare()
-    with LocalShowdownServer(
-        args.showdown_dir,
-        port=args.server_port,
-        bootstrap=not args.no_bootstrap_server,
-        startup_timeout=args.server_startup_timeout,
-        log_path=args.output_dir / "showdown.log",
-        stop_on_exit=not args.keep_server,
-    ):
-        with manager:
-            summary = asyncio.run(_collect(args, args.output_dir, manager, enemy_pool))
+    with server:
+        if args.enemy_policy == "foul-play":
+            enemy_schedule, pool_report = _enemy_schedule(
+                enemy_team_files,
+                games=args.games,
+                seed=args.seed,
+            )
+            enemy_output = args.output_dir / "enemy"
+            enemy_output.mkdir()
+            enemy_manager = ExternalOpponentProcess(
+                "foul-play",
+                opponents_dir=args.opponents_dir,
+                output_dir=enemy_output,
+                team_file=enemy_team_files[0],
+                battle_format=args.battle_format,
+                games=args.games,
+                server_port=args.server_port,
+                bootstrap=not args.no_bootstrap_opponents,
+                startup_timeout=args.opponent_startup_timeout,
+                challenger=TEACHER_USERNAME,
+                foul_play_search_time_ms=(
+                    args.enemy_foul_play_search_time_ms
+                    or args.foul_play_search_time_ms
+                ),
+                foul_play_parallelism=args.foul_play_parallelism,
+                foul_play_search_threads=args.foul_play_search_threads,
+                username=FOUL_PLAY_ENEMY_USERNAME,
+                foul_play_mode="accept_challenge",
+                foul_play_team_files=enemy_schedule,
+                capture_teacher_trace=False,
+            )
+            with manager, enemy_manager:
+                summary = _collect_foul_play_vs_foul_play(
+                    args,
+                    args.output_dir,
+                    manager,
+                    enemy_manager,
+                    pool_report,
+                )
+        else:
+            with manager:
+                summary = asyncio.run(_collect(args, args.output_dir, manager, enemy_pool))
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

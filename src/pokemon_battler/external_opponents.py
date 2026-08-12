@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import IO
+from typing import IO, Sequence
 
 
 @dataclass(frozen=True)
@@ -190,6 +190,10 @@ class ExternalOpponentProcess:
         foul_play_search_time_ms: int = 100,
         foul_play_parallelism: int = 1,
         foul_play_search_threads: int = 1,
+        username: str | None = None,
+        foul_play_mode: str = "challenge_user",
+        foul_play_team_files: Sequence[Path] | None = None,
+        capture_teacher_trace: bool = True,
     ) -> None:
         self.spec = EXTERNAL_OPPONENTS[opponent]
         self.opponents_dir = opponents_dir
@@ -204,6 +208,18 @@ class ExternalOpponentProcess:
         self.foul_play_search_time_ms = foul_play_search_time_ms
         self.foul_play_parallelism = foul_play_parallelism
         self.foul_play_search_threads = foul_play_search_threads
+        self._username = username or self.spec.username
+        if foul_play_mode not in {"challenge_user", "accept_challenge"}:
+            raise ValueError(
+                "foul_play_mode must be 'challenge_user' or 'accept_challenge'"
+            )
+        self.foul_play_mode = foul_play_mode
+        self.foul_play_team_files = (
+            [Path(path).resolve() for path in foul_play_team_files]
+            if foul_play_team_files is not None
+            else None
+        )
+        self.capture_teacher_trace = capture_teacher_trace
         self.checkout: Path | None = None
         self.process: subprocess.Popen[str] | None = None
         self.log_path = output_dir / "opponent.log"
@@ -214,7 +230,7 @@ class ExternalOpponentProcess:
 
     @property
     def username(self) -> str:
-        return self.spec.username
+        return self._username
 
     def prepare(self) -> None:
         self.checkout = _ensure_checkout(
@@ -265,10 +281,35 @@ class ExternalOpponentProcess:
             self.checkout,
             bootstrap=self.bootstrap,
         )
-        team_target = (
-            self.checkout / "fp" / "teams" / "teams" / "pokemon-battler-opponent.txt"
+        team_directory = self.checkout / "fp" / "teams" / "teams"
+        safe_username = "".join(
+            character for character in self.username.lower() if character.isalnum()
         )
-        shutil.copyfile(self.team_file, team_target)
+        team_prefix = f"pokemon-battler-{safe_username}"
+        team_arguments: list[str]
+        if self.foul_play_team_files is None:
+            team_target = team_directory / f"{team_prefix}.txt"
+            shutil.copyfile(self.team_file, team_target)
+            team_arguments = ["--team-name", team_target.name]
+        else:
+            if not self.foul_play_team_files:
+                raise ValueError("A Foul Play team schedule cannot be empty")
+            copied_names: dict[Path, str] = {}
+            scheduled_names: list[str] = []
+            for source in self.foul_play_team_files:
+                if source not in copied_names:
+                    target_name = f"{team_prefix}-{len(copied_names):03d}.txt"
+                    shutil.copyfile(source, team_directory / target_name)
+                    copied_names[source] = target_name
+                scheduled_names.append(copied_names[source])
+            team_list = team_directory / f"{team_prefix}-list.txt"
+            team_list.write_text("\n".join(scheduled_names) + "\n", encoding="utf-8")
+            team_arguments = ["--team-list", team_list.name]
+        trace_arguments = (
+            ["--teacher-trace", str(self.teacher_trace_path.resolve())]
+            if self.capture_teacher_trace
+            else []
+        )
         worker = Path(__file__).with_name("foul_play_worker.py")
         command = [
             str(python),
@@ -279,22 +320,18 @@ class ExternalOpponentProcess:
             str(self.ready_path.resolve()),
             "--start-file",
             str(self.start_path.resolve()),
-            "--teacher-trace",
-            str(self.teacher_trace_path.resolve()),
+            *trace_arguments,
             "--websocket-uri",
             f"ws://localhost:{self.server_port}/showdown/websocket",
             "--ps-username",
             self.username,
             "--bot-mode",
-            "challenge_user",
-            "--user-to-challenge",
-            self.challenger,
+            self.foul_play_mode,
             "--pokemon-format",
             self.battle_format,
             "--run-count",
             str(self.games),
-            "--team-name",
-            team_target.name,
+            *team_arguments,
             "--search-time-ms",
             str(self.foul_play_search_time_ms),
             "--search-parallelism",
@@ -304,6 +341,8 @@ class ExternalOpponentProcess:
             "--log-level",
             "INFO",
         ]
+        if self.foul_play_mode == "challenge_user":
+            command.extend(["--user-to-challenge", self.challenger])
         return command, os.environ.copy()
 
     def __enter__(self) -> ExternalOpponentProcess:
@@ -389,12 +428,20 @@ class ExternalOpponentProcess:
 
     @property
     def challenges_player(self) -> bool:
-        return self.spec.worker == "foul-play"
+        return (
+            self.spec.worker == "foul-play"
+            and self.foul_play_mode == "challenge_user"
+        )
+
+    def start(self) -> None:
+        """Release a local Foul Play worker after every peer reports ready."""
+        if self.spec.worker == "foul-play":
+            self.start_path.write_text(f"{self.challenger}\n", encoding="utf-8")
 
     def start_challenges(self) -> None:
         if not self.challenges_player:
             return
-        self.start_path.write_text(f"{self.challenger}\n", encoding="utf-8")
+        self.start()
 
     def metadata(self) -> dict[str, str | int]:
         return {
@@ -402,7 +449,7 @@ class ExternalOpponentProcess:
             "repository": self.spec.repository,
             "revision": self.spec.revision,
             "license": self.spec.license,
-            "username": self.spec.username,
+            "username": self.username,
             "team_preview": (
                 "published-search-preview"
                 if self.spec.worker == "foul-play"
@@ -413,7 +460,11 @@ class ExternalOpponentProcess:
                     "search_time_ms": self.foul_play_search_time_ms,
                     "search_parallelism": self.foul_play_parallelism,
                     "search_threads": self.foul_play_search_threads,
-                    "teacher_trace": str(self.teacher_trace_path),
+                    **(
+                        {"teacher_trace": str(self.teacher_trace_path)}
+                        if self.capture_teacher_trace
+                        else {}
+                    ),
                 }
                 if self.spec.worker == "foul-play"
                 else {}

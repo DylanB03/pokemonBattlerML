@@ -22,13 +22,23 @@ stable indices are necessary to align a Foul Play choice such as `stealthrock`,
 that the interaction head scores. They are labels in the data, not language the
 model must learn to emit.
 
-## Fixed-team perspective
+## Strong-vs-strong fixed-team perspective
 
-The teacher must make decisions from the model's deployment perspective. Foul
-Play therefore controls the model's one fixed team during collection. Its
-opponent receives a different team from a shuffled OU pool before every battle.
-Randomizing Foul Play's own team would be backwards: the resulting examples
-would teach Qwen as though its own roster changed while the enemy stayed fixed.
+The teacher must make decisions from the model's deployment perspective. One
+Foul Play instance therefore controls the model's fixed team and records its
+full MCTS policy. A second, independent Foul Play instance controls the opponent
+and receives a different team from a shuffled OU pool before every battle. Both
+use the same search budget by default. Randomizing the teacher's own team would
+be backwards: the resulting examples would teach Qwen as though its deployment
+roster changed.
+
+This distinction matters. A strong teacher playing a weak heuristic still
+produces strong labels, but the weak opponent determines which states occur. A
+42-1 teacher record, for example, mostly samples responses to exploitable play
+and underrepresents difficult switches, preservation, setup, prediction, and
+endgames. Foul-Play-vs-Foul-Play makes both the action targets and the state
+distribution search-backed. `--enemy-policy heuristic`, `max-power`, and
+`random` remain available only for controlled ablations and wiring tests.
 
 The dedicated collection command requires at least two distinct enemy team
 files. It samples without replacement within shuffled cycles and prevents the
@@ -64,8 +74,8 @@ Smogon's maintained [SV OU sample teams](https://www.smogon.com/forums/threads/s
 are one suitable source.
 
 Then run this after the current public campaign is finished. It launches the
-pinned Foul Play checkout on the local Showdown server, keeps the model team
-fixed, and does not affect public ELO or load Qwen:
+pinned Foul Play checkout twice on the local Showdown server, keeps the model
+team fixed, and does not affect public ELO or load Qwen:
 
 ```bash
 python -m pokemon_battler.teacher_collect \
@@ -76,13 +86,29 @@ python -m pokemon_battler.teacher_collect \
   --output-dir reports/teacher/foul-play-001
 ```
 
-`summary.json` explicitly records `teacher_team_fixed: true` and
-`enemy_teams_randomized: true`. `enemy_team_selections.json` records the exact
-team used in each battle, its result, the selection order, and per-team counts,
-while `teacher_examples` reports how many usable decisions were collected. More
-search time generally produces a better teacher target but makes collection
-proportionally slower. Prefer 250-500 ms for a dataset that will actually train
-a checkpoint.
+The default `--enemy-policy foul-play` means the matchup is strong-vs-strong.
+`PBFoulPlay` is the fixed-team teacher and `PBFoulPlayEnemy` is the randomized
+opponent. These are temporary users on the local `--no-security` server; the
+collector does not read `.env`, connect to public Showdown, or touch ladder ELO.
+The terminal prints `[teacher N/100]` with the current record after every game.
+Detailed search logs are saved to `opponent.log` and `enemy/opponent.log`.
+
+Before launching either bot, the collector validates the fixed team and every
+enemy team against the installed Showdown rules. An obsolete team now fails
+immediately with its exact legality error instead of leaving challenge handling
+waiting forever for a battle that Showdown rejected. A ten-minute no-log-progress
+watchdog provides a second failure boundary and can be adjusted with
+`--battle-stall-timeout`.
+
+`summary.json` explicitly records `teacher_team_fixed: true`, both Foul Play
+revisions and search budgets, and `enemy_teams_randomized: true`.
+`enemy_team_selections.json` records the exact enemy team used in each battle,
+its result, the selection order, and per-team counts, while `teacher_examples`
+reports how many usable decisions were collected. More search time generally
+produces a better teacher target but makes collection proportionally slower.
+Prefer 250-500 ms for a dataset that will actually train a checkpoint. Use
+`--enemy-foul-play-search-time-ms` only when deliberately testing an asymmetric
+opponent; otherwise it inherits the teacher's value.
 
 Individual enemy files can be supplied instead of a directory by repeating
 `--enemy-team-file`. Collection parses the exports and fails before starting

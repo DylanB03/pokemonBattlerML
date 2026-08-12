@@ -79,9 +79,54 @@ class ExternalOpponentTests(unittest.TestCase):
                 manager.teacher_trace_path.resolve(),
             )
             copied_team = (
-                checkout / "fp" / "teams" / "teams" / "pokemon-battler-opponent.txt"
+                checkout
+                / "fp"
+                / "teams"
+                / "teams"
+                / "pokemon-battler-pbfoulplay.txt"
             )
             self.assertEqual(copied_team.read_text(encoding="utf-8"), "Pikachu\n- Thunderbolt\n")
+
+    def test_second_foul_play_accepts_with_a_scheduled_enemy_team_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manager = self._manager(root, "foul-play")
+            checkout = root / "opponents" / "foul-play"
+            (checkout / ".venv" / "bin").mkdir(parents=True)
+            (checkout / ".venv" / "bin" / "python").touch()
+            (checkout / ".venv" / ".pokemon-battler-dependencies-v1").write_text(
+                "poke-engine==0.0.48\n",
+                encoding="utf-8",
+            )
+            team_directory = checkout / "fp" / "teams" / "teams"
+            team_directory.mkdir(parents=True)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            first.write_text("Pikachu\n- Thunderbolt\n", encoding="utf-8")
+            second.write_text("Raichu\n- Surf\n", encoding="utf-8")
+            manager.checkout = checkout
+            manager._username = "PBFoulPlayEnemy"
+            manager.foul_play_mode = "accept_challenge"
+            manager.foul_play_team_files = [first.resolve(), second.resolve(), first.resolve()]
+            manager.capture_teacher_trace = False
+
+            command, _ = manager._foul_play_command()
+
+            self.assertEqual(
+                command[command.index("--bot-mode") + 1], "accept_challenge"
+            )
+            self.assertNotIn("--user-to-challenge", command)
+            self.assertNotIn("--teacher-trace", command)
+            team_list_name = command[command.index("--team-list") + 1]
+            scheduled = (team_directory / team_list_name).read_text(encoding="utf-8")
+            self.assertEqual(
+                scheduled.splitlines(),
+                [
+                    "pokemon-battler-pbfoulplayenemy-000.txt",
+                    "pokemon-battler-pbfoulplayenemy-001.txt",
+                    "pokemon-battler-pbfoulplayenemy-000.txt",
+                ],
+            )
 
     def test_metadata_records_source_search_and_preview_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
