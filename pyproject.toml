@@ -34,6 +34,7 @@ pokemon-interaction-run = "pokemon_battler.interaction_experiment:main"
 pokemon-live-eval = "pokemon_battler.live_eval:main"
 pokemon-public-play = "pokemon_battler.public_play:main"
 pokemon-win-train = "pokemon_battler.win_experiment:main"
+pokemon-distill = "pokemon_battler.distill:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

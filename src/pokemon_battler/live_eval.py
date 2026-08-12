@@ -220,6 +220,17 @@ async def _run_battles(
         wins = sum(battle.won is True for battle in battles)
         losses = sum(battle.lost is True for battle in battles)
         ties = len(battles) - wins - losses
+        teacher_examples = None
+        if (
+            external_opponent is not None
+            and external_opponent.spec.name == "foul-play"
+        ):
+            trace_path = external_opponent.teacher_trace_path
+            if trace_path.is_file():
+                with trace_path.open(encoding="utf-8") as stream:
+                    teacher_examples = sum(1 for line in stream if line.strip())
+            else:
+                teacher_examples = 0
         return {
             "schema": "local-showdown-eval-v1",
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -238,6 +249,7 @@ async def _run_battles(
             "losses": losses,
             "ties": ties,
             "win_rate": wins / len(battles) if battles else None,
+            "teacher_examples": teacher_examples,
             "win_rate_wilson_95": _wilson_interval(wins, len(battles)),
             "decisions": player.decision_count,
             "fallbacks": player.fallback_count,

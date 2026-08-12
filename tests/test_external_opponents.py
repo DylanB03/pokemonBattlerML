@@ -74,6 +74,10 @@ class ExternalOpponentTests(unittest.TestCase):
             self.assertEqual(command[command.index("--bot-mode") + 1], "challenge_user")
             self.assertEqual(command[command.index("--user-to-challenge") + 1], "PBPolicy")
             self.assertIn("--start-file", command)
+            self.assertEqual(
+                Path(command[command.index("--teacher-trace") + 1]),
+                manager.teacher_trace_path.resolve(),
+            )
             copied_team = (
                 checkout / "fp" / "teams" / "teams" / "pokemon-battler-opponent.txt"
             )
@@ -86,6 +90,7 @@ class ExternalOpponentTests(unittest.TestCase):
             self.assertEqual(metadata["search_time_ms"], 100)
             self.assertEqual(metadata["team_preview"], "published-search-preview")
             self.assertEqual(metadata["license"], "GPL-3.0")
+            self.assertEqual(metadata["teacher_trace"], str(manager.teacher_trace_path))
 
 
 if __name__ == "__main__":

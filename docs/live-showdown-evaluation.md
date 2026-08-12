@@ -87,6 +87,12 @@ The external integrations execute the published policies as separate processes;
 they do not reimplement their choice rules in this repository. The exact source
 revisions are pinned and written into each summary:
 
+When Foul Play is selected, the report directory also contains
+`foul_play_teacher.jsonl`. This is the MCTS policy-distillation dataset from
+Foul Play's decisions in those games. It does not change the live evaluation or
+load another Qwen model. See [Foul Play policy distillation](foul-play-distillation.md)
+for the schema and training command.
+
 | Opponent | Source revision | License | Runtime behavior |
 | --- | --- | --- | --- |
 | PokéChamp One-Step | `0f84c460319ebe733f8c3028e58a2a5452c60d85` | MIT | Scores immediate attacks by estimated turns to faint; it does not proactively switch in the selected published path. |
@@ -161,6 +167,8 @@ Each run gets a new `reports/live/<timestamp>/` directory:
 - `decisions.jsonl` records every observation, exact legal mask, action
   distribution, selected order, auxiliary value estimate, latency, and
   fallback reason;
+- `foul_play_teacher.jsonl`, for Foul Play runs, records its unfiltered MCTS
+  visit distribution and the matching public observation for distillation;
 - `replays/` contains Showdown replay logs;
 - `summary.json` contains wins, losses, ties, the raw win rate, a 95% Wilson
   interval, decision and fallback counts, latency statistics, and per-battle

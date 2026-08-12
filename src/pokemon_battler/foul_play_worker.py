@@ -12,6 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--ready-file", type=Path, required=True)
     parser.add_argument("--start-file", type=Path, required=True)
+    parser.add_argument("--teacher-trace", type=Path)
     return parser
 
 
@@ -24,6 +25,11 @@ def main() -> None:
 
     from fp.main import run_foul_play
     from fp.websocket_client import PSWebsocketClient
+
+    if known.teacher_trace is not None:
+        from foul_play_teacher_bridge import install_foul_play_teacher_trace
+
+        install_foul_play_teacher_trace(known.teacher_trace.resolve())
 
     async def local_no_security_login(client: PSWebsocketClient) -> str:
         await client.get_id_and_challstr()

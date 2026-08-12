@@ -209,6 +209,7 @@ class ExternalOpponentProcess:
         self.log_path = output_dir / "opponent.log"
         self.ready_path = output_dir / "opponent.ready"
         self.start_path = output_dir / "opponent.start"
+        self.teacher_trace_path = output_dir / "foul_play_teacher.jsonl"
         self._log_stream: IO[str] | None = None
 
     @property
@@ -278,6 +279,8 @@ class ExternalOpponentProcess:
             str(self.ready_path.resolve()),
             "--start-file",
             str(self.start_path.resolve()),
+            "--teacher-trace",
+            str(self.teacher_trace_path.resolve()),
             "--websocket-uri",
             f"ws://localhost:{self.server_port}/showdown/websocket",
             "--ps-username",
@@ -410,6 +413,7 @@ class ExternalOpponentProcess:
                     "search_time_ms": self.foul_play_search_time_ms,
                     "search_parallelism": self.foul_play_parallelism,
                     "search_threads": self.foul_play_search_threads,
+                    "teacher_trace": str(self.teacher_trace_path),
                 }
                 if self.spec.worker == "foul-play"
                 else {}
