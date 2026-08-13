@@ -1,0 +1,10 @@
+# Valid, composition-distinct Gen 9 OU exports bundled with the pinned PokeChamp fixture.
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou1.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou2.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou5.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou6.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou7.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou8.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou10.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou11.txt
+data/opponents/pokechamp/poke_env/data/static/teams/gen9ou/gen9ou13.txt

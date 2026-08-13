@@ -54,8 +54,16 @@ directory. Each decision contains:
 - player and opponent rosters plus recent transitions;
 - the exact legal candidate mask;
 - the unfiltered MCTS visit distribution across all mapped legal choices;
+- each searched action's average MCTS win value and the root value;
 - Foul Play's selected action, confidence, entropy, and total search visits;
+- the final battle outcome, enemy team, and number of decisions in the trajectory;
 - the raw Foul Play choice distribution for auditing.
+
+There is also one `decision_phase: team_preview` row per battle. It contains the
+six-way soft lead policy and action values used to train the separate lead head.
+At runtime that head evaluates the fixed deployment team against the opponent's
+public preview; the bot no longer rotates or hard-codes slot one when the head is
+present.
 
 The collector taps the distribution before Foul Play discards choices below 75%
 of its best choice. That softer target preserves information such as “switching
@@ -63,8 +71,10 @@ is plausible, but this attack is somewhat better” instead of reducing every
 position to one noisy hard label.
 
 The saved observation contains only what Foul Play knew before it sampled
-opponent sets for search. Sampled hidden items, moves, abilities, and spreads are
-not copied into the student's input.
+opponent sets for search. A shared canonicalizer removes unrevealed HP, item,
+ability, Tera, status, and move fields and reconstructs the same turn/history
+context used by live inference. Sampled hidden sets are never copied into the
+student's input.
 
 ## Collect teacher games
 
@@ -115,7 +125,9 @@ Individual enemy files can be supplied instead of a directory by repeating
 Showdown if fewer than two distinct species compositions resolve; reordered
 copies of one team do not count as diversity.
 
-Multiple runs can be joined before training:
+Multiple runs may be joined before training, but only combine collections made
+with the same strong-vs-strong setup. The end-to-end pipeline does this itself
+and never imports the old heuristic-opponent traces.
 
 ```bash
 find reports/teacher -name foul_play_teacher.jsonl -print0 \
@@ -145,25 +157,70 @@ before and after the update:
 - `teacher_confidence` and `student_entropy`: useful checks for noisy or collapsed
   policies.
 
-The loss is computed only over exactly legal candidates. It uses the soft MCTS
-distribution, retains a small hard-label term for Foul Play's selected choice,
-and gives extra weight to states where a confident teacher disagrees with the
-student. Weight normalization keeps the effective learning-rate scale stable.
+The loss is computed only over exactly legal candidates. Its default is now the
+complete soft MCTS policy—there is no random hard-choice term and no confidence
+weight that suppresses uncertain Tera examples. It also trains soft action-family
+targets, per-action MCTS values, and the root value. Tera-bearing policies receive
+controlled extra weight, while each battle has a capped total contribution so a
+single 200-turn game cannot dominate dozens of normal games. The deployed scorer
+uses the learned action value as a conservative secondary score.
 
-Use `--validation-data` with a teacher trace from different battles when enough
-data has been collected. Without it, the before/after measurements use the
-training file and measure fit rather than generalization.
+Qwen is frozen by default during this small teacher update. The interaction head
+does the first adaptation, and `--rehearsal-data` mixes human replay decisions to
+limit forgetting. Pass `--no-freeze-qwen` only after a larger teacher corpus has
+shown held-out gains. When no explicit validation file is given, the trainer now
+holds out complete enemy-team compositions when metadata permits, otherwise
+complete battles. It never reports the training set as validation and restores
+the best validation head before saving.
 
 ## What this does and does not prove
 
-This first stage is policy distillation on Foul Play's visited states. It gives
-Qwen supervised examples of search-backed switches, setup moves, recovery,
-hazards, Tera decisions, and attacks. The deployed model remains Qwen plus the
-interaction head and does not call Foul Play or `poke-engine` at battle time.
+The deployed model remains Qwen plus learned PyTorch heads and does not call Foul
+Play or `poke-engine` at battle time. Collection can now run DAgger by giving the
+student control of a fraction of the fixed-team teacher's decisions while Foul
+Play searches and labels every state it visits:
 
-It is not yet DAgger: Foul Play is not shadow-searching every state visited by a
-Qwen-controlled player. If offline teacher agreement rises but battle win rate
-does not, the next useful extension is a shadow-advisor pass over student-visited
-states, followed by another distillation round. Promotion should still be based
-on held-out games against Foul Play, the heuristic opponents, and the previous
-checkpoint—not training loss alone.
+```bash
+python -m pokemon_battler.teacher_collect \
+  --team-file examples/teams/gen9ou-balance.txt \
+  --enemy-team-dir data/teams/gen9ou-train \
+  --student-checkpoint outputs/current-champion \
+  --student-action-probability 0.7 \
+  --games 200 \
+  --output-dir reports/teacher/dagger-001
+```
+
+This is not ordinary teacher self-play: the `behavior.source` field proves
+whether the teacher or student actually chose each action. The labels always
+remain Foul Play's full search targets. Later rounds aggregate all new traces so
+they expand the visited-state distribution instead of repeatedly fitting one
+small batch.
+
+## One end-to-end command
+
+The recommended command keeps the deployment team fixed, reserves three enemy
+compositions that never enter training, performs an expert round followed by
+student-controlled DAgger rounds, trains the corrected turn and preview heads,
+and compares every candidate with the current champion on the identical held-out
+Foul Play schedule:
+
+```bash
+python -m pokemon_battler.win_pipeline \
+  --checkpoint outputs/public-learning/positive-winrate-1000/batch-005/candidate \
+  --team-file examples/teams/gen9ou-balance.txt \
+  --enemy-team-manifest examples/opponent-pools/gen9ou-foul-play.txt \
+  --output-dir outputs/qwen-dagger-v1 \
+  --rounds 3 \
+  --games-per-round 200 \
+  --evaluation-games 100 \
+  --search-time-ms 250
+```
+
+Every round is retained under `round-NN/`; rejected candidates are not deleted.
+`manifest.json` records the permanent train/held-out team split, aggregate data
+size, student-control probability, promotion result, and current champion. A
+candidate is promoted only when its held-out win-rate delta is positive and the
+paired bootstrap interval is not strongly negative. PPO is deliberately absent
+from this pipeline. It should only be reconsidered after DAgger stops improving
+the held-out suite, because sparse public-game PPO was the least informative and
+most failure-prone update in the previous process.

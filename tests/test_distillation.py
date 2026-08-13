@@ -68,6 +68,48 @@ class DistillationTests(unittest.TestCase):
         loss.backward()
         self.assertIsNotNone(logits.grad)
 
+    def test_q_root_and_outcome_targets_train_separate_value_heads(self) -> None:
+        log_probs = torch.full((1, 13), float("-inf"))
+        log_probs[0, 0] = math.log(0.2)
+        log_probs[0, 4] = math.log(0.8)
+        log_probs.requires_grad_()
+        action_values = torch.zeros((1, 13))
+        action_values[0, 0] = 0.25
+        action_values[0, 4] = 0.75
+        value_logits = torch.zeros(1, requires_grad=True)
+        q_logits = torch.zeros((1, 13), requires_grad=True)
+        teacher = torch.zeros((1, 13))
+        teacher[0, 0] = 0.2
+        teacher[0, 4] = 0.8
+        legal = torch.zeros((1, 13), dtype=torch.bool)
+        legal[0, [0, 4]] = True
+        q_mask = legal.clone()
+        loss, metrics = teacher_distillation_loss(
+            {
+                "action_log_probs": log_probs,
+                "action_value_logits": q_logits,
+                "value_logits": value_logits,
+            },
+            {
+                "teacher_probabilities": teacher,
+                "teacher_action_ids": torch.tensor([4]),
+                "legal_action_mask": legal,
+                "teacher_action_values": action_values,
+                "teacher_action_value_mask": q_mask,
+                "teacher_root_values": torch.tensor([0.65]),
+                "teacher_root_value_mask": torch.tensor([True]),
+                "teacher_outcome_values": torch.tensor([1.0]),
+                "teacher_outcome_mask": torch.tensor([True]),
+                "teacher_row_weights": torch.ones(1),
+            },
+        )
+        loss.backward()
+        self.assertGreater(float(metrics["action_value_loss"]), 0)
+        self.assertGreater(float(metrics["root_value_loss"]), 0)
+        self.assertGreater(float(metrics["outcome_value_loss"]), 0)
+        self.assertIsNotNone(q_logits.grad)
+        self.assertIsNotNone(value_logits.grad)
+
 
 if __name__ == "__main__":
     unittest.main()

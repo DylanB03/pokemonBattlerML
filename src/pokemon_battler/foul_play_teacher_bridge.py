@@ -11,15 +11,18 @@ import copy
 import json
 import logging
 import math
+import random
 import re
 import threading
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 ACTION_COUNT = 13
 SCHEMA_VERSION = 3
-TEACHER_SCHEMA = "foul-play-distillation-v1"
+TEACHER_SCHEMA = "foul-play-distillation-v2"
+PREVIEW_SCHEMA = "foul-play-team-preview-v1"
 
 
 def _normalized(value: Any, default: str = "") -> str:
@@ -65,6 +68,43 @@ def aggregate_mcts_policy(
     if total > 0:
         policy = {choice: weight / total for choice, weight in policy.items()}
     return policy, visits
+
+
+def aggregate_mcts_targets(
+    mcts_results: list[tuple[Any, float, int]],
+) -> tuple[dict[str, float], dict[str, float], float | None, int]:
+    """Aggregate visit policy and per-action expected win values.
+
+    Foul Play's ``total_score / visits`` is the MCTS estimate for an action in
+    one sampled hidden state. Values are combined with the same hidden-state
+    probability and visit support used for the policy target.
+    """
+    policy, visits = aggregate_mcts_policy(mcts_results)
+    value_sums: dict[str, float] = {}
+    value_weights: dict[str, float] = {}
+    for result, sample_chance, _index in mcts_results:
+        for option in getattr(result, "side_one", ()):
+            option_visits = int(getattr(option, "visits", 0) or 0)
+            choice = str(getattr(option, "move_choice", ""))
+            if not choice or option_visits <= 0:
+                continue
+            average = float(getattr(option, "total_score", 0.0)) / option_visits
+            if not math.isfinite(average):
+                continue
+            weight = float(sample_chance) * option_visits
+            value_sums[choice] = value_sums.get(choice, 0.0) + average * weight
+            value_weights[choice] = value_weights.get(choice, 0.0) + weight
+    action_values = {
+        choice: max(0.0, min(1.0, value_sums[choice] / value_weights[choice]))
+        for choice in value_sums
+        if value_weights[choice] > 0
+    }
+    root_value = (
+        sum(probability * action_values[choice] for choice, probability in policy.items())
+        if policy and all(choice in action_values for choice in policy if policy[choice] > 0)
+        else None
+    )
+    return policy, action_values, root_value, visits
 
 
 def _move_state(move: Any | None) -> dict[str, Any]:
@@ -120,7 +160,7 @@ def _pokemon_state(pokemon: Any) -> dict[str, Any]:
     if bool(getattr(pokemon, "terastallized", False)) and getattr(
         pokemon, "tera_type", None
     ):
-        types = [getattr(pokemon, "tera_type")]
+        types = [pokemon.tera_type]
     normalized_types = [_normalized(value, "notype") for value in types[:2]]
     while len(normalized_types) < 2:
         normalized_types.append("notype")
@@ -324,6 +364,8 @@ class FoulPlayObservationTracker:
         raw_policy: dict[str, float],
         selected_choice: str,
         visit_count: int,
+        raw_action_values: dict[str, float] | None = None,
+        root_value: float | None = None,
     ) -> dict[str, Any] | None:
         if battle.user.active is None or battle.opponent.active is None:
             return None
@@ -404,8 +446,13 @@ class FoulPlayObservationTracker:
             event["decision_offset"] = index - len(history)
 
         probabilities = [0.0] * ACTION_COUNT
+        action_values: list[float | None] = [None] * ACTION_COUNT
         for action_id, probability in action_policy.items():
             probabilities[action_id] = probability
+        for choice, value in (raw_action_values or {}).items():
+            action_id = _choice_action_id(state, choice)
+            if action_id is not None and action_id in legal:
+                action_values[action_id] = float(value)
         positive = [value for value in probabilities if value > 0]
         entropy = -sum(value * math.log(value) for value in positive)
         confidence = max(probabilities)
@@ -431,12 +478,106 @@ class FoulPlayObservationTracker:
                 "selected_choice": selected_choice,
                 "selected_action_id": selected_action,
                 "raw_policy": raw_policy,
+                "action_values": action_values,
+                "root_value": root_value,
                 "unmapped_policy_mass": sum(unmapped.values()),
             },
         }
         self.previous_state = copy.deepcopy(state)
         self.decision_count += 1
         return row
+
+
+def _preview_row(
+    battle: Any,
+    raw_policy: dict[str, float],
+    raw_action_values: dict[str, float],
+    root_value: float | None,
+    selected_choice: str,
+    visit_count: int,
+) -> dict[str, Any] | None:
+    player = [pokemon for pokemon in battle.user.reserve if pokemon is not None]
+    opponent = [pokemon for pokemon in battle.opponent.reserve if pokemon is not None]
+    if not player or not opponent:
+        return None
+    player.sort(key=lambda pokemon: int(getattr(pokemon, "index", 99) or 99))
+    player_names = [_normalized(pokemon.name) for pokemon in player]
+
+    def lead_index(choice: str) -> int | None:
+        name = _normalized(choice.lower().removeprefix("switch "))
+        try:
+            return player_names.index(name)
+        except ValueError:
+            return None
+
+    policy = [0.0] * len(player)
+    action_values: list[float | None] = [None] * len(player)
+    for choice, probability in raw_policy.items():
+        index = lead_index(choice)
+        if index is not None:
+            policy[index] += float(probability)
+    for choice, value in raw_action_values.items():
+        index = lead_index(choice)
+        if index is not None:
+            action_values[index] = float(value)
+    selected = lead_index(selected_choice)
+    total = sum(policy)
+    if selected is None or total <= 0:
+        return None
+    policy = [value / total for value in policy]
+
+    def roster(members: list[Any], side: str) -> list[dict[str, Any]]:
+        rows = []
+        for slot, pokemon in enumerate(members):
+            row = _pokemon_state(pokemon)
+            row.update(
+                {
+                    "slot": slot,
+                    "side": side,
+                    "active": False,
+                    "present": True,
+                    "revealed": side == "player",
+                    "fainted": False,
+                }
+            )
+            if side == "opponent":
+                row.update(
+                    {
+                        "hp_pct": None,
+                        "item": "unknownitem",
+                        "ability": "unknownability",
+                        "tera_type": "notype",
+                        "moves": [],
+                    }
+                )
+            rows.append(row)
+        return rows
+
+    return {
+        "teacher_schema": TEACHER_SCHEMA,
+        "preview_schema": PREVIEW_SCHEMA,
+        "decision_phase": "team_preview",
+        "schema_version": SCHEMA_VERSION,
+        "battle_id": str(getattr(battle, "battle_tag", "unknown-battle")),
+        "turn_index": -1,
+        "state": {
+            "format": _normalized(getattr(battle, "pokemon_format", None), "gen9ou"),
+            "opponent_teampreview": [_normalized(pokemon.name) for pokemon in opponent],
+        },
+        "player_roster": roster(player, "player"),
+        "opponent_roster": roster(opponent, "opponent"),
+        "legal_action_ids": list(range(len(player))),
+        "action_id": selected,
+        "teacher": {
+            "name": "foul-play",
+            "policy": policy,
+            "action_values": action_values,
+            "root_value": root_value,
+            "visit_count": visit_count,
+            "selected_choice": selected_choice,
+            "selected_action_id": selected,
+        },
+    }
 
 
 class _TraceWriter:
@@ -452,7 +593,13 @@ class _TraceWriter:
             stream.write("\n")
 
 
-def install_foul_play_teacher_trace(path: str | Path) -> None:
+def install_foul_play_teacher_trace(
+    path: str | Path,
+    *,
+    advisor_url: str | None = None,
+    student_action_probability: float = 0.0,
+    seed: int = 42,
+) -> None:
     """Patch Foul Play's parent-process selection hook and save teacher rows."""
     from fp.modes import base as modes_base
     from fp.search import main as search_main
@@ -462,16 +609,81 @@ def install_foul_play_teacher_trace(path: str | Path) -> None:
     original_find = modes_base.find_best_move
     original_select = search_main.select_move_from_mcts_results
     search_lock = threading.Lock()
+    rng = random.Random(seed)
+
+    def student_choice(
+        row: dict[str, Any], raw_policy: dict[str, float], teacher_choice: str
+    ) -> str:
+        if advisor_url is None or rng.random() >= student_action_probability:
+            row["behavior"] = {"source": "teacher", "choice": teacher_choice}
+            return teacher_choice
+        request = urllib.request.Request(
+            advisor_url,
+            data=json.dumps(row, separators=(",", ":")).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                advice = json.loads(response.read())
+            action_id = int(advice["action_id"])
+        except Exception as error:  # noqa: BLE001 - advisor failure must fall back safely
+            LOGGER.warning("Student advisor failed; using teacher action: %s", error)
+            row["behavior"] = {
+                "source": "teacher-fallback",
+                "choice": teacher_choice,
+                "error": str(error),
+            }
+            return teacher_choice
+        preview = row.get("decision_phase") == "team_preview"
+        for choice in raw_policy:
+            mapped = (
+                _normalized(choice.lower().removeprefix("switch "))
+                if preview
+                else _choice_action_id(row["state"], choice)
+            )
+            if preview:
+                player = sorted(
+                    row["player_roster"], key=lambda pokemon: int(pokemon.get("slot", 99))
+                )
+                mapped = next(
+                    (
+                        index
+                        for index, pokemon in enumerate(player)
+                        if _normalized(pokemon.get("name")) == mapped
+                    ),
+                    None,
+                )
+            if mapped == action_id:
+                row["behavior"] = {
+                    "source": "student",
+                    "choice": choice,
+                    "action_id": action_id,
+                    "preferences": advice.get("preferences"),
+                }
+                return choice
+        row["behavior"] = {
+            "source": "teacher-fallback",
+            "choice": teacher_choice,
+            "error": f"advisor returned unmappable A{action_id}",
+        }
+        return teacher_choice
 
     def traced_find_best_move(battle: Any) -> str:
-        if bool(getattr(battle, "team_preview", False)):
-            return original_find(battle)
         captured_policy: dict[str, float] = {}
+        captured_action_values: dict[str, float] = {}
+        captured_root_value: float | None = None
         captured_visits = 0
 
         def traced_select(results: list[tuple[Any, float, int]]) -> str:
-            nonlocal captured_policy, captured_visits
-            captured_policy, captured_visits = aggregate_mcts_policy(results)
+            nonlocal captured_policy, captured_action_values
+            nonlocal captured_root_value, captured_visits
+            (
+                captured_policy,
+                captured_action_values,
+                captured_root_value,
+                captured_visits,
+            ) = aggregate_mcts_targets(results)
             return original_select(results)
 
         # Foul Play normally searches one battle decision at a time. The lock also
@@ -483,9 +695,30 @@ def install_foul_play_teacher_trace(path: str | Path) -> None:
             finally:
                 search_main.select_move_from_mcts_results = original_select
         battle_id = str(getattr(battle, "battle_tag", "unknown-battle"))
+        if bool(getattr(battle, "team_preview", False)):
+            row = _preview_row(
+                battle,
+                captured_policy,
+                captured_action_values,
+                captured_root_value,
+                choice,
+                captured_visits,
+            )
+            if row is not None:
+                choice = student_choice(row, captured_policy, choice)
+                writer.write(row)
+            return choice
         tracker = trackers.setdefault(battle_id, FoulPlayObservationTracker(battle_id))
-        row = tracker.observe(battle, captured_policy, choice, captured_visits)
+        row = tracker.observe(
+            battle,
+            captured_policy,
+            choice,
+            captured_visits,
+            captured_action_values,
+            captured_root_value,
+        )
         if row is not None:
+            choice = student_choice(row, captured_policy, choice)
             writer.write(row)
         return choice
 

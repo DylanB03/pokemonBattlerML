@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import random
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, BinaryIO, Sequence
+from typing import Any, BinaryIO
 
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from torch.utils.data import Dataset
 from pokemon_battler.actions import ACTION_COUNT, action_label, legal_action_ids
 from pokemon_battler.mechanics import MECHANICS_SCHEMA as LEGACY_MECHANICS_SCHEMA
 from pokemon_battler.mechanics_v2 import MECHANICS_SCHEMA as DEFAULT_MECHANICS_SCHEMA
+from pokemon_battler.observations import canonicalize_observation
 from pokemon_battler.prompting import encode_candidate_prompt, render_prompt
 
 
@@ -37,21 +39,7 @@ def _mechanics_spec(schema: str) -> tuple[int, int, Any]:
 
 def state_with_row_context(row: dict[str, Any]) -> dict[str, Any]:
     """Add decision-time metadata available in legacy prepared rows."""
-    state = row["state"]
-    additions: dict[str, Any] = {}
-    if "turn_index" not in state and row.get("turn_index") is not None:
-        additions["turn_index"] = int(row["turn_index"])
-    if "player_remaining" not in state:
-        active = state.get("player_active_pokemon") or {}
-        active_alive = (
-            float(active.get("hp_pct", 0) or 0) > 0 and active.get("status") != "fnt"
-        )
-        additions["player_remaining"] = len(state.get("available_switches") or []) + int(
-            active_alive
-        )
-    if not additions:
-        return state
-    return state | additions
+    return canonicalize_observation(row)["state"]
 
 
 class JsonlOffsetDataset(Dataset[dict[str, Any]]):
@@ -450,12 +438,13 @@ class InteractionCollator:
         require_target: bool,
     ) -> dict[str, Any]:
         from pokemon_battler.interaction_features import (
-            build_interaction_observation_features,
             build_interaction_features,
+            build_interaction_observation_features,
             validate_interaction_observation,
             validate_interaction_row,
         )
 
+        row = canonicalize_observation(row)
         if require_target:
             validate_interaction_row(row)
         else:

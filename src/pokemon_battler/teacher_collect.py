@@ -8,9 +8,10 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from poke_env import (
     AccountConfiguration,
@@ -23,10 +24,13 @@ from poke_env import (
 
 from pokemon_battler.external_opponents import ExternalOpponentProcess
 from pokemon_battler.live_eval import DEFAULT_TEAM, _wilson_interval
+from pokemon_battler.live_policy import InteractionPolicyRuntime
+from pokemon_battler.observations import canonicalize_observation
 from pokemon_battler.poke_env_compat import (
     close_poke_env_clients,
     install_safe_poke_env_shutdown,
 )
+from pokemon_battler.policy_advisor import PolicyAdvisorServer
 from pokemon_battler.showdown_server import LocalShowdownServer
 from pokemon_battler.team_pool import ShuffledTeamPool, resolve_team_pool
 
@@ -88,6 +92,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail if neither Foul Play log changes for this many seconds.",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--student-checkpoint",
+        type=Path,
+        help="Run DAgger: let this Qwen policy control a fraction of teacher states.",
+    )
+    parser.add_argument(
+        "--student-action-probability",
+        type=float,
+        default=0.0,
+        help="Probability that the student, rather than Foul Play, acts (0..1).",
+    )
+    parser.add_argument("--student-advisor-port", type=int, default=8765)
     return parser
 
 
@@ -147,6 +163,58 @@ def _latest_foul_play_record(log_path: Path) -> tuple[int, int]:
 
 def _file_modified_at(path: Path) -> float:
     return path.stat().st_mtime if path.is_file() else 0.0
+
+
+def _finalize_teacher_trace(
+    trace_path: Path,
+    battles: Sequence[dict[str, Any]],
+) -> dict[str, int]:
+    """Attach outcome/team targets and normalize every collected observation."""
+    if not trace_path.is_file():
+        return {"rows": 0, "turn_rows": 0, "preview_rows": 0}
+    rows: list[dict[str, Any]] = []
+    order: list[str] = []
+    decision_counts: dict[str, int] = {}
+    with trace_path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            battle_id = str(row.get("battle_id") or "")
+            if battle_id and battle_id not in order:
+                order.append(battle_id)
+            if row.get("decision_phase") != "team_preview":
+                decision_counts[battle_id] = decision_counts.get(battle_id, 0) + 1
+            rows.append(row)
+    if len(order) != len(battles):
+        raise RuntimeError(
+            "Teacher trace battle order does not align with completed games: "
+            f"trace={len(order)}, games={len(battles)}"
+        )
+    metadata = {battle_id: dict(battle) for battle_id, battle in zip(order, battles)}
+    temporary = trace_path.with_suffix(trace_path.suffix + ".tmp")
+    preview_rows = 0
+    with temporary.open("w", encoding="utf-8") as stream:
+        for row in rows:
+            battle_id = str(row.get("battle_id") or "")
+            battle = metadata[battle_id]
+            result = str(battle.get("result") or "")
+            row["outcome"] = (
+                "WIN" if result == "teacher-win" else "LOSS" if result == "enemy-win" else "TIE"
+            )
+            row["battle_decision_count"] = decision_counts.get(battle_id, 0)
+            row["enemy_team_file"] = battle.get("enemy_team_file")
+            if row.get("decision_phase") == "team_preview":
+                preview_rows += 1
+            else:
+                row = canonicalize_observation(row)
+            stream.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+    temporary.replace(trace_path)
+    return {
+        "rows": len(rows),
+        "turn_rows": len(rows) - preview_rows,
+        "preview_rows": preview_rows,
+    }
 
 
 async def _collect(
@@ -211,6 +279,7 @@ async def _collect(
                 }
             )
         trace_path = manager.teacher_trace_path
+        trace_counts = _finalize_teacher_trace(trace_path, battle_results)
         if trace_path.is_file():
             with trace_path.open(encoding="utf-8") as stream:
                 teacher_examples = sum(1 for line in stream if line.strip())
@@ -241,6 +310,7 @@ async def _collect(
                 teacher_wins, len(battles)
             ),
             "teacher_examples": teacher_examples,
+            "teacher_trace_counts": trace_counts,
             "teacher_trace": str(trace_path),
             "battles": battle_results,
         }
@@ -313,10 +383,8 @@ def _collect_foul_play_vs_foul_play(
     teacher_wins = sum(winner == TEACHER_USERNAME for winner in winners)
     enemy_wins = sum(winner == FOUL_PLAY_ENEMY_USERNAME for winner in winners)
     ties = len(winners) - teacher_wins - enemy_wins
-    trace_path = teacher.teacher_trace_path
-    with trace_path.open(encoding="utf-8") as stream:
-        teacher_examples = sum(1 for line in stream if line.strip())
     selections = list(pool_report["selections"])
+    battle_results: list[dict[str, Any]] = []
     for index, selection in enumerate(selections):
         winner = winners[index]
         selection["result"] = (
@@ -326,6 +394,16 @@ def _collect_foul_play_vs_foul_play(
             if winner == FOUL_PLAY_ENEMY_USERNAME
             else "tie"
         )
+        battle_results.append(
+            {
+                "enemy_team_file": selection["team_file"],
+                "result": selection["result"],
+            }
+        )
+    trace_path = teacher.teacher_trace_path
+    trace_counts = _finalize_teacher_trace(trace_path, battle_results)
+    with trace_path.open(encoding="utf-8") as stream:
+        teacher_examples = sum(1 for line in stream if line.strip())
     pool_report["selections"] = selections
     (output_dir / "enemy_team_selections.json").write_text(
         json.dumps(pool_report, indent=2, sort_keys=True) + "\n",
@@ -350,6 +428,7 @@ def _collect_foul_play_vs_foul_play(
         "teacher_win_rate": teacher_wins / len(winners) if winners else None,
         "teacher_win_rate_wilson_95": _wilson_interval(teacher_wins, len(winners)),
         "teacher_examples": teacher_examples,
+        "teacher_trace_counts": trace_counts,
         "teacher_trace": str(trace_path),
     }
 
@@ -359,6 +438,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--games must be positive")
     if not 1 <= args.server_port <= 65535:
         raise ValueError("--server-port must be between 1 and 65535")
+    if not 0 <= args.student_action_probability <= 1:
+        raise ValueError("--student-action-probability must be between zero and one")
+    if args.student_action_probability > 0 and args.student_checkpoint is None:
+        raise ValueError("A positive student action probability requires --student-checkpoint")
     positive_search = {
         "--opponent-startup-timeout": args.opponent_startup_timeout,
         "--server-startup-timeout": args.server_startup_timeout,
@@ -418,6 +501,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         + "\n",
         encoding="utf-8",
     )
+    advisor = None
+    if args.student_checkpoint is not None:
+        advisor = PolicyAdvisorServer(
+            InteractionPolicyRuntime(args.student_checkpoint),
+            port=args.student_advisor_port,
+        )
     manager = ExternalOpponentProcess(
         "foul-play",
         opponents_dir=args.opponents_dir,
@@ -436,50 +525,59 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         foul_play_search_time_ms=args.foul_play_search_time_ms,
         foul_play_parallelism=args.foul_play_parallelism,
         foul_play_search_threads=args.foul_play_search_threads,
+        student_advisor_url=advisor.url if advisor is not None else None,
+        student_action_probability=args.student_action_probability,
+        dagger_seed=args.seed,
     )
     manager.prepare()
-    with server:
-        if args.enemy_policy == "foul-play":
-            enemy_schedule, pool_report = _enemy_schedule(
-                enemy_team_files,
-                games=args.games,
-                seed=args.seed,
-            )
-            enemy_output = args.output_dir / "enemy"
-            enemy_output.mkdir()
-            enemy_manager = ExternalOpponentProcess(
-                "foul-play",
-                opponents_dir=args.opponents_dir,
-                output_dir=enemy_output,
-                team_file=enemy_team_files[0],
-                battle_format=args.battle_format,
-                games=args.games,
-                server_port=args.server_port,
-                bootstrap=not args.no_bootstrap_opponents,
-                startup_timeout=args.opponent_startup_timeout,
-                challenger=TEACHER_USERNAME,
-                foul_play_search_time_ms=(
-                    args.enemy_foul_play_search_time_ms
-                    or args.foul_play_search_time_ms
-                ),
-                foul_play_parallelism=args.foul_play_parallelism,
-                foul_play_search_threads=args.foul_play_search_threads,
-                username=FOUL_PLAY_ENEMY_USERNAME,
-                foul_play_mode="accept_challenge",
-                foul_play_team_files=enemy_schedule,
-                capture_teacher_trace=False,
-            )
-            with manager, enemy_manager:
-                summary = _collect_foul_play_vs_foul_play(
-                    args,
-                    args.output_dir,
-                    manager,
-                    enemy_manager,
-                    pool_report,
+    if advisor is not None:
+        advisor.__enter__()
+    try:
+        with server:
+            if args.enemy_policy == "foul-play":
+                enemy_schedule, pool_report = _enemy_schedule(
+                    enemy_team_files,
+                    games=args.games,
+                    seed=args.seed,
                 )
-        else:
-            with manager:
-                summary = asyncio.run(_collect(args, args.output_dir, manager, enemy_pool))
+                enemy_output = args.output_dir / "enemy"
+                enemy_output.mkdir()
+                enemy_manager = ExternalOpponentProcess(
+                    "foul-play",
+                    opponents_dir=args.opponents_dir,
+                    output_dir=enemy_output,
+                    team_file=enemy_team_files[0],
+                    battle_format=args.battle_format,
+                    games=args.games,
+                    server_port=args.server_port,
+                    bootstrap=not args.no_bootstrap_opponents,
+                    startup_timeout=args.opponent_startup_timeout,
+                    challenger=TEACHER_USERNAME,
+                    foul_play_search_time_ms=(
+                        args.enemy_foul_play_search_time_ms
+                        or args.foul_play_search_time_ms
+                    ),
+                    foul_play_parallelism=args.foul_play_parallelism,
+                    foul_play_search_threads=args.foul_play_search_threads,
+                    username=FOUL_PLAY_ENEMY_USERNAME,
+                    foul_play_mode="accept_challenge",
+                    foul_play_team_files=enemy_schedule,
+                    capture_teacher_trace=False,
+                )
+                with manager, enemy_manager:
+                    summary = _collect_foul_play_vs_foul_play(
+                        args,
+                        args.output_dir,
+                        manager,
+                        enemy_manager,
+                        pool_report,
+                    )
+            else:
+                with manager:
+                    summary = asyncio.run(_collect(args, args.output_dir, manager, enemy_pool))
+    finally:
+        if advisor is not None:
+            advisor.__exit__(None, None, None)
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

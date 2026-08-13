@@ -13,6 +13,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ready-file", type=Path, required=True)
     parser.add_argument("--start-file", type=Path, required=True)
     parser.add_argument("--teacher-trace", type=Path)
+    parser.add_argument("--student-advisor-url")
+    parser.add_argument("--student-action-probability", type=float, default=0.0)
+    parser.add_argument("--dagger-seed", type=int, default=42)
     return parser
 
 
@@ -29,7 +32,12 @@ def main() -> None:
     if known.teacher_trace is not None:
         from foul_play_teacher_bridge import install_foul_play_teacher_trace
 
-        install_foul_play_teacher_trace(known.teacher_trace.resolve())
+        install_foul_play_teacher_trace(
+            known.teacher_trace.resolve(),
+            advisor_url=known.student_advisor_url,
+            student_action_probability=known.student_action_probability,
+            seed=known.dagger_seed,
+        )
 
     async def local_no_security_login(client: PSWebsocketClient) -> str:
         await client.get_id_and_challstr()

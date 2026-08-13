@@ -4,11 +4,12 @@ import json
 import math
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from poke_env.battle.abstract_battle import AbstractBattle
@@ -28,8 +29,13 @@ from pokemon_battler.modeling import (
     load_policy_model,
     load_training_metadata,
 )
+from pokemon_battler.team_preview import (
+    TeamPreviewCollator,
+    has_team_preview_head,
+    live_preview_observation,
+    load_team_preview_head,
+)
 from pokemon_battler.training_data import InteractionInferenceCollator
-
 
 _HTML_TAG = re.compile(r"<[^>]*>")
 _RATING_UPDATE = re.compile(
@@ -71,6 +77,7 @@ class InteractionPrediction:
     action_id: int
     log_probabilities: dict[int, float]
     preferences: dict[int, float]
+    action_values: dict[int, float]
     entropy: float
     value_probability: float
     latency_seconds: float
@@ -141,6 +148,38 @@ class InteractionPolicyRuntime:
             prompt_format=self.prompt_format,
         )
         self.logits_parameter = indexed_logits_parameter(self.model)
+        self.action_value_weight = float(
+            metadata.get("deployment_action_value_weight", 0.0) or 0.0
+        )
+        self.preview_head = None
+        self.preview_collator = None
+        if has_team_preview_head(self.checkpoint):
+            self.preview_head = load_team_preview_head(
+                int(self.model.config.hidden_size), self.checkpoint, self.device
+            )
+            self.preview_head.eval()
+            self.preview_collator = TeamPreviewCollator(
+                self.tokenizer, max_length=self.max_length
+            )
+
+    def predict_team_preview(self, row: dict[str, Any]) -> int:
+        if self.preview_head is None or self.preview_collator is None:
+            raise FileNotFoundError(
+                f"Checkpoint has no learned team-preview head: {self.checkpoint}"
+            )
+        from pokemon_battler.modeling import _last_hidden_states
+
+        batch = {
+            key: value.to(self.device) for key, value in self.preview_collator([row]).items()
+        }
+        with torch.inference_mode():
+            hidden = _last_hidden_states(
+                self.model, batch, logits_parameter=self.logits_parameter
+            )
+            position = batch["attention_mask"].sum(1) - 1
+            state_hidden = hidden[torch.arange(hidden.shape[0], device=self.device), position]
+            logits = self.preview_head(state_hidden, batch)
+        return int(logits[0].argmax().item())
 
     def predict(
         self,
@@ -165,13 +204,22 @@ class InteractionPolicyRuntime:
             )
         action_log_probs = outputs["action_log_probs"][0].float().cpu()
         legal = [int(value) for value in row["legal_action_ids"]]
+        action_value_logits = outputs["action_value_logits"][0].float().cpu()
+        action_values = {
+            action_id: float(torch.sigmoid(action_value_logits[action_id]).item())
+            for action_id in legal
+        }
         log_probabilities = {
             action_id: float(action_log_probs[action_id].item()) for action_id in legal
         }
         if not all(math.isfinite(value) for value in log_probabilities.values()):
             raise ValueError("Interaction policy returned a non-finite legal-action score")
         sampling_log_probabilities = {
-            action_id: log_probability / temperature
+            action_id: (
+                log_probability
+                + self.action_value_weight * float(action_value_logits[action_id].item())
+            )
+            / temperature
             for action_id, log_probability in log_probabilities.items()
         }
         maximum = max(sampling_log_probabilities.values())
@@ -218,6 +266,7 @@ class InteractionPolicyRuntime:
             action_id=action_id,
             log_probabilities=log_probabilities,
             preferences=preferences,
+            action_values=action_values,
             entropy=entropy,
             value_probability=value_probability,
             latency_seconds=perf_counter() - started,
@@ -259,7 +308,7 @@ class InteractionPlayer(Player):
         fail_fast: bool = False,
         sample_actions: bool = False,
         sampling_temperature: float = 1.0,
-        team_preview_policy: str = "first",
+        team_preview_policy: str = "learned",
         decision_callback: Callable[[dict[str, Any]], None] | None = None,
         **player_kwargs: Any,
     ) -> None:
@@ -268,8 +317,8 @@ class InteractionPlayer(Player):
         self.fail_fast = fail_fast
         self.sample_actions = sample_actions
         self.sampling_temperature = sampling_temperature
-        if team_preview_policy not in {"first", "random"}:
-            raise ValueError("team_preview_policy must be 'first' or 'random'")
+        if team_preview_policy not in {"learned", "first", "random"}:
+            raise ValueError("team_preview_policy must be 'learned', 'first', or 'random'")
         self.team_preview_policy = team_preview_policy
         self.decision_callback = decision_callback
         self.trackers: dict[str, LiveBattleTracker] = {}
@@ -282,6 +331,19 @@ class InteractionPlayer(Player):
     def teampreview(self, battle: AbstractBattle) -> str:
         if self.team_preview_policy == "random":
             return self.random_teampreview(battle)
+        if self.team_preview_policy == "learned":
+            if self.runtime.preview_head is None:
+                self.logger.warning(
+                    "Checkpoint has no team-preview head; using submitted slot one"
+                )
+                return deterministic_teampreview(battle)
+            row = live_preview_observation(battle)
+            lead = self.runtime.predict_team_preview(row)
+            members = list(range(1, len(row["player_roster"]) + 1))
+            lead_slot = members.pop(lead)
+            for pokemon in battle.team.values():
+                pokemon._selected_in_teampreview = True
+            return "/team " + "".join(str(member) for member in [lead_slot, *members])
         return deterministic_teampreview(battle)
 
     def _capture_rating_updates(self, split_messages: list[list[str]]) -> None:
@@ -339,6 +401,10 @@ class InteractionPlayer(Player):
                 "preferences": {
                     action_label(key): value
                     for key, value in prediction.preferences.items()
+                },
+                "action_values": {
+                    action_label(key): value
+                    for key, value in prediction.action_values.items()
                 },
                 "entropy": prediction.entropy,
                 "value_probability": prediction.value_probability,

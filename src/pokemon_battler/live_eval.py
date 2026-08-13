@@ -5,9 +5,10 @@ import asyncio
 import json
 import math
 import statistics
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from poke_env import (
     AccountConfiguration,
@@ -261,7 +262,11 @@ async def _run_battles(
                 else 0.0
             ),
             "inference_latency_seconds": _latency_summary(player.inference_latencies),
-            "lead_policy": "submitted-team-order-slot-1",
+            "lead_policy": (
+                "learned-team-preview-head"
+                if runtime.preview_head is not None
+                else "submitted-team-order-slot-1-fallback"
+            ),
             "opponent_lead_policy": (
                 external_opponent.metadata()["team_preview"]
                 if external_opponent is not None
@@ -298,7 +303,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--foul-play-parallelism must be positive")
     if args.foul_play_search_threads <= 0:
         raise ValueError("--foul-play-search-threads must be positive")
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     output_dir = args.output_dir or Path("reports/live") / timestamp
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / "run_config.json").write_text(

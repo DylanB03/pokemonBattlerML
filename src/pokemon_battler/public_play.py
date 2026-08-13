@@ -6,11 +6,12 @@ import gc
 import json
 import os
 import warnings
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import torch
 from dotenv import dotenv_values
@@ -35,7 +36,6 @@ from pokemon_battler.poke_env_compat import (
 from pokemon_battler.reinforcement import WinTrajectoryBuffer
 from pokemon_battler.rl_training import train_ppo_rollouts
 from pokemon_battler.win_experiment import _promotion_evaluation
-
 
 PUBLIC_SCHEMA = "public-showdown-session-v2"
 DEFAULT_ENV_FILE = Path(".env")
@@ -1045,7 +1045,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--team-file", type=Path, default=DEFAULT_TEAM)
     parser.add_argument("--battle-format", default="gen9ou")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--team-preview", choices=("first", "random"), default="random")
+    parser.add_argument(
+        "--team-preview", choices=("learned", "first", "random"), default="learned"
+    )
     parser.add_argument(
         "--sample-actions",
         action=argparse.BooleanOptionalAction,

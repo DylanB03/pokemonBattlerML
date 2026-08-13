@@ -195,6 +195,24 @@ def _pokemon_key(pokemon: dict[str, Any]) -> str:
 
 def _public_pokemon(pokemon: dict[str, Any]) -> dict[str, Any]:
     result = dict(pokemon)
+    # Defense in depth for legacy teacher files: an unrevealed preview slot may
+    # have been initialized at full HP by an opponent engine.  That is not
+    # battle-time public information and must not become a learned feature.
+    if result.get("side") == "opponent" and not bool(result.get("revealed")):
+        result.update(
+            {
+                "hp_pct": None,
+                "item": "unknownitem",
+                "ability": "unknownability",
+                "tera_type": "notype",
+                "terastallized": False,
+                "status": "nostatus",
+                "effect": "noeffect",
+                "moves": [],
+            }
+        )
+        for stat in ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion"):
+            result[f"{stat}_boost"] = 0
     species = _pokemon_key(result)
     data = _GEN9_POKEDEX.get(species, {})
     for stat, value in (data.get("baseStats") or {}).items():
@@ -231,7 +249,7 @@ def _roster_hp_mean(roster: list[dict[str, Any]], *, revealed_only: bool = False
 
 def global_features(row: dict[str, Any]) -> tuple[list[float], list[int]]:
     state = row["state"]
-    legal = set(int(value) for value in row["legal_action_ids"])
+    legal = {int(value) for value in row["legal_action_ids"]}
     player_conditions = _condition_values(state.get("player_conditions"))
     opponent_conditions = _condition_values(state.get("opponent_conditions"))
     player_roster = row["player_roster"]
@@ -449,7 +467,7 @@ def candidate_actor_slots(row: dict[str, Any]) -> list[int]:
     active_slot = roster_by_key.get(_pokemon_key(state["player_active_pokemon"]), -1)
     switches = sorted_switches(state)
     slots = [-1] * ACTION_COUNT
-    legal = set(int(value) for value in row["legal_action_ids"])
+    legal = {int(value) for value in row["legal_action_ids"]}
     for action_id in legal:
         if 4 <= action_id <= 8:
             slots[action_id] = roster_by_key.get(_pokemon_key(switches[action_id - 4]), -1)
@@ -500,7 +518,7 @@ def _build_interaction_features(row: dict[str, Any]) -> dict[str, Any]:
     pokemon_numeric, pokemon_ids, pokemon_mask = pokemon_features(row)
     history_numeric, history_ids, history_mask = history_features(row)
     state = row["state"]
-    legal = set(int(value) for value in row["legal_action_ids"])
+    legal = {int(value) for value in row["legal_action_ids"]}
     return {
         "global_numeric": global_numeric,
         "global_ids": global_ids,

@@ -36,6 +36,9 @@ pokemon-public-play = "pokemon_battler.public_play:main"
 pokemon-win-train = "pokemon_battler.win_experiment:main"
 pokemon-distill = "pokemon_battler.distill:main"
 pokemon-teacher-collect = "pokemon_battler.teacher_collect:main"
+pokemon-preview-train = "pokemon_battler.preview_train:main"
+pokemon-policy-suite = "pokemon_battler.policy_suite:main"
+pokemon-win-pipeline = "pokemon_battler.win_pipeline:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

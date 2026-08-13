@@ -84,6 +84,13 @@ after every game and fails stalled or illegal-team collections explicitly.
 overwriting the source model. See
 [Foul Play policy distillation](docs/foul-play-distillation.md).
 
+The full win-optimization path is available as `pokemon-win-pipeline`. It adds
+public-information normalization, MCTS policy/Q/value targets, a learned team
+preview head, student-state DAgger, trajectory balancing, replay rehearsal, and
+held-out Foul Play promotion. It keeps the fixed player team and every candidate
+checkpoint, and it does not use a battle engine at deployment time. The exact
+command and artifact layout are documented in the same guide.
+
 On the completed 20-game fixed-team samples, the checkpoint scored 20–0 against
 PokéChamp One-Step, 20–0 against PokéChamp Abyssal, and 4–16 against Foul Play's
 100 ms search. All 1,659 decisions completed without a fallback. These results

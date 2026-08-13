@@ -5,10 +5,11 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Sequence
+from typing import IO
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,9 @@ class ExternalOpponentProcess:
         foul_play_mode: str = "challenge_user",
         foul_play_team_files: Sequence[Path] | None = None,
         capture_teacher_trace: bool = True,
+        student_advisor_url: str | None = None,
+        student_action_probability: float = 0.0,
+        dagger_seed: int = 42,
     ) -> None:
         self.spec = EXTERNAL_OPPONENTS[opponent]
         self.opponents_dir = opponents_dir
@@ -220,6 +224,9 @@ class ExternalOpponentProcess:
             else None
         )
         self.capture_teacher_trace = capture_teacher_trace
+        self.student_advisor_url = student_advisor_url
+        self.student_action_probability = student_action_probability
+        self.dagger_seed = dagger_seed
         self.checkout: Path | None = None
         self.process: subprocess.Popen[str] | None = None
         self.log_path = output_dir / "opponent.log"
@@ -310,6 +317,18 @@ class ExternalOpponentProcess:
             if self.capture_teacher_trace
             else []
         )
+        advisor_arguments = (
+            [
+                "--student-advisor-url",
+                self.student_advisor_url,
+                "--student-action-probability",
+                str(self.student_action_probability),
+                "--dagger-seed",
+                str(self.dagger_seed),
+            ]
+            if self.student_advisor_url is not None
+            else []
+        )
         worker = Path(__file__).with_name("foul_play_worker.py")
         command = [
             str(python),
@@ -321,6 +340,7 @@ class ExternalOpponentProcess:
             "--start-file",
             str(self.start_path.resolve()),
             *trace_arguments,
+            *advisor_arguments,
             "--websocket-uri",
             f"ws://localhost:{self.server_port}/showdown/websocket",
             "--ps-username",
@@ -345,7 +365,7 @@ class ExternalOpponentProcess:
             command.extend(["--user-to-challenge", self.challenger])
         return command, os.environ.copy()
 
-    def __enter__(self) -> ExternalOpponentProcess:
+    def __enter__(self) -> ExternalOpponentProcess:  # noqa: PYI034
         self.prepare()
         self.ready_path.unlink(missing_ok=True)
         self.start_path.unlink(missing_ok=True)
@@ -463,6 +483,14 @@ class ExternalOpponentProcess:
                     **(
                         {"teacher_trace": str(self.teacher_trace_path)}
                         if self.capture_teacher_trace
+                        else {}
+                    ),
+                    **(
+                        {
+                            "student_advisor_url": self.student_advisor_url,
+                            "student_action_probability": self.student_action_probability,
+                        }
+                        if self.student_advisor_url is not None
                         else {}
                     ),
                 }
