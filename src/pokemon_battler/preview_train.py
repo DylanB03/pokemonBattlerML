@@ -42,3 +42,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         attn_implementation=args.attn_implementation,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

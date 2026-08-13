@@ -57,9 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--team-file", type=Path, default=DEFAULT_TEAM)
     parser.add_argument("--enemy-team-file", type=Path, action="append", default=[])
     parser.add_argument("--enemy-team-dir", type=Path)
-    parser.add_argument(
-        "--enemy-policy", choices=ENEMY_POLICY_NAMES, default="foul-play"
-    )
+    parser.add_argument("--enemy-policy", choices=ENEMY_POLICY_NAMES, default="foul-play")
     parser.add_argument("--games", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--battle-format", default="gen9ou")
@@ -104,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Probability that the student, rather than Foul Play, acts (0..1).",
     )
     parser.add_argument("--student-advisor-port", type=int, default=8765)
+    parser.add_argument(
+        "--student-advisor-url",
+        help="Use an already loaded local Qwen advisor instead of loading a checkpoint.",
+    )
+    parser.add_argument("--teacher-username", default=TEACHER_USERNAME)
+    parser.add_argument("--foul-play-enemy-username", default=FOUL_PLAY_ENEMY_USERNAME)
     return parser
 
 
@@ -135,8 +139,7 @@ def _validate_showdown_teams(
             failures.append(f"{team_file}: {reason}")
     if failures:
         raise ValueError(
-            "Showdown rejected these team files before collection:\n- "
-            + "\n- ".join(failures)
+            "Showdown rejected these team files before collection:\n- " + "\n- ".join(failures)
         )
 
 
@@ -243,7 +246,7 @@ async def _collect(
                 raise TimeoutError(f"{ENEMY_USERNAME} did not log in within 10 seconds")
             await asyncio.sleep(0.05)
         manager.start_challenges()
-        await enemy.accept_challenges(TEACHER_USERNAME, args.games)
+        await enemy.accept_challenges(args.teacher_username, args.games)
         manager.ensure_success()
 
         battles = list(enemy.battles.values())
@@ -306,9 +309,7 @@ async def _collect(
             "enemy_wins": enemy_wins,
             "ties": ties,
             "teacher_win_rate": teacher_wins / len(battles) if battles else None,
-            "teacher_win_rate_wilson_95": _wilson_interval(
-                teacher_wins, len(battles)
-            ),
+            "teacher_win_rate_wilson_95": _wilson_interval(teacher_wins, len(battles)),
             "teacher_examples": teacher_examples,
             "teacher_trace_counts": trace_counts,
             "teacher_trace": str(trace_path),
@@ -377,11 +378,9 @@ def _collect_foul_play_vs_foul_play(
 
     winners = _foul_play_winners(teacher.log_path)
     if len(winners) != args.games:
-        raise RuntimeError(
-            f"Teacher recorded {len(winners)} finished games, expected {args.games}"
-        )
-    teacher_wins = sum(winner == TEACHER_USERNAME for winner in winners)
-    enemy_wins = sum(winner == FOUL_PLAY_ENEMY_USERNAME for winner in winners)
+        raise RuntimeError(f"Teacher recorded {len(winners)} finished games, expected {args.games}")
+    teacher_wins = sum(winner == args.teacher_username for winner in winners)
+    enemy_wins = sum(winner == args.foul_play_enemy_username for winner in winners)
     ties = len(winners) - teacher_wins - enemy_wins
     selections = list(pool_report["selections"])
     battle_results: list[dict[str, Any]] = []
@@ -389,9 +388,9 @@ def _collect_foul_play_vs_foul_play(
         winner = winners[index]
         selection["result"] = (
             "teacher-win"
-            if winner == TEACHER_USERNAME
+            if winner == args.teacher_username
             else "enemy-win"
-            if winner == FOUL_PLAY_ENEMY_USERNAME
+            if winner == args.foul_play_enemy_username
             else "tie"
         )
         battle_results.append(
@@ -440,8 +439,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--server-port must be between 1 and 65535")
     if not 0 <= args.student_action_probability <= 1:
         raise ValueError("--student-action-probability must be between zero and one")
-    if args.student_action_probability > 0 and args.student_checkpoint is None:
-        raise ValueError("A positive student action probability requires --student-checkpoint")
+    if (
+        args.student_action_probability > 0
+        and args.student_checkpoint is None
+        and args.student_advisor_url is None
+    ):
+        raise ValueError(
+            "A positive student action probability requires --student-checkpoint "
+            "or --student-advisor-url"
+        )
+    if args.student_checkpoint is not None and args.student_advisor_url is not None:
+        raise ValueError("Use only one of --student-checkpoint and --student-advisor-url")
     positive_search = {
         "--opponent-startup-timeout": args.opponent_startup_timeout,
         "--server-startup-timeout": args.server_startup_timeout,
@@ -452,9 +460,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "--battle-stall-timeout": args.battle_stall_timeout,
     }
     if args.enemy_foul_play_search_time_ms is not None:
-        positive_search["--enemy-foul-play-search-time-ms"] = (
-            args.enemy_foul_play_search_time_ms
-        )
+        positive_search["--enemy-foul-play-search-time-ms"] = args.enemy_foul_play_search_time_ms
     invalid = [name for name, value in positive_search.items() if value <= 0]
     if invalid:
         raise ValueError(f"These arguments must be positive: {', '.join(invalid)}")
@@ -518,14 +524,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         bootstrap=not args.no_bootstrap_opponents,
         startup_timeout=args.opponent_startup_timeout,
         challenger=(
-            FOUL_PLAY_ENEMY_USERNAME
-            if args.enemy_policy == "foul-play"
-            else ENEMY_USERNAME
+            args.foul_play_enemy_username if args.enemy_policy == "foul-play" else ENEMY_USERNAME
         ),
         foul_play_search_time_ms=args.foul_play_search_time_ms,
         foul_play_parallelism=args.foul_play_parallelism,
         foul_play_search_threads=args.foul_play_search_threads,
-        student_advisor_url=advisor.url if advisor is not None else None,
+        username=args.teacher_username,
+        student_advisor_url=(advisor.url if advisor is not None else args.student_advisor_url),
         student_action_probability=args.student_action_probability,
         dagger_seed=args.seed,
     )
@@ -552,14 +557,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     server_port=args.server_port,
                     bootstrap=not args.no_bootstrap_opponents,
                     startup_timeout=args.opponent_startup_timeout,
-                    challenger=TEACHER_USERNAME,
+                    challenger=args.teacher_username,
                     foul_play_search_time_ms=(
-                        args.enemy_foul_play_search_time_ms
-                        or args.foul_play_search_time_ms
+                        args.enemy_foul_play_search_time_ms or args.foul_play_search_time_ms
                     ),
                     foul_play_parallelism=args.foul_play_parallelism,
                     foul_play_search_threads=args.foul_play_search_threads,
-                    username=FOUL_PLAY_ENEMY_USERNAME,
+                    username=args.foul_play_enemy_username,
                     foul_play_mode="accept_challenge",
                     foul_play_team_files=enemy_schedule,
                     capture_teacher_trace=False,

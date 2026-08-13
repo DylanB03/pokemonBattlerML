@@ -6,6 +6,7 @@ import json
 import random
 from argparse import Namespace
 from collections.abc import Sequence
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foul-play-search-time-ms", type=int, default=250)
     parser.add_argument("--foul-play-parallelism", type=int, default=1)
     parser.add_argument("--foul-play-search-threads", type=int, default=1)
+    parser.add_argument("--concurrent-games", type=int, default=4)
     parser.add_argument("--promotion-margin", type=float, default=0.0)
     parser.add_argument("--no-bootstrap-server", action="store_true")
     parser.add_argument("--no-bootstrap-opponents", action="store_true")
@@ -93,36 +95,59 @@ def _run_policy(
     output_dir: Path,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True)
-    manager = ExternalOpponentProcess(
-        "foul-play",
-        opponents_dir=args.opponents_dir,
-        output_dir=output_dir,
-        team_file=schedule[0],
-        battle_format="gen9ou",
-        games=args.games,
-        server_port=args.server_port,
-        bootstrap=not args.no_bootstrap_opponents,
-        challenger=PLAYER_USERNAME,
-        foul_play_search_time_ms=args.foul_play_search_time_ms,
-        foul_play_parallelism=args.foul_play_parallelism,
-        foul_play_search_threads=args.foul_play_search_threads,
-        foul_play_team_files=schedule,
-        capture_teacher_trace=False,
-    )
-    manager.prepare()
-    with manager:
+    workers = min(args.concurrent_games, args.games)
+    schedules = [schedule[worker::workers] for worker in range(workers)]
+    managers = []
+    for worker, worker_schedule in enumerate(schedules):
+        worker_output = output_dir / f"worker-{worker:02d}"
+        worker_output.mkdir()
+        manager = ExternalOpponentProcess(
+            "foul-play",
+            opponents_dir=args.opponents_dir,
+            output_dir=worker_output,
+            team_file=worker_schedule[0],
+            battle_format="gen9ou",
+            games=len(worker_schedule),
+            server_port=args.server_port,
+            bootstrap=not args.no_bootstrap_opponents,
+            challenger=PLAYER_USERNAME,
+            foul_play_search_time_ms=args.foul_play_search_time_ms,
+            foul_play_parallelism=args.foul_play_parallelism,
+            foul_play_search_threads=args.foul_play_search_threads,
+            foul_play_team_files=worker_schedule,
+            capture_teacher_trace=False,
+            username=f"PBFoulEvalW{worker:02d}",
+        )
+        manager.prepare()
+        managers.append(manager)
+    with ExitStack() as stack:
+        for manager in managers:
+            stack.enter_context(manager)
         return asyncio.run(
             _run_battles(
                 _arguments(checkpoint, args.team_file, args.games, args.server_port),
                 output_dir,
-                external_opponent=manager,
+                external_opponent=managers,
             )
         )
+
+
+def _indexed_results(summary: dict[str, Any]) -> dict[tuple[str, int, str], int]:
+    return {
+        (
+            str(row["opponent"]).lower(),
+            int(row["opponent_game_index"]),
+            str(row["scheduled_enemy_team_file"]),
+        ): int(bool(row["won"]))
+        for row in summary["battles"]
+    }
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.output_dir.exists():
         raise FileExistsError(args.output_dir)
+    if args.games <= 0 or args.concurrent_games <= 0:
+        raise ValueError("--games and --concurrent-games must be positive")
     teams = resolve_team_pool(args.enemy_team_file, args.enemy_team_dir, minimum_teams=3)
     schedule = _schedule(teams, args.games, args.seed)
     args.output_dir.mkdir(parents=True)
@@ -134,8 +159,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ):
         candidate = _run_policy(args, args.candidate, schedule, args.output_dir / "candidate")
         champion = _run_policy(args, args.champion, schedule, args.output_dir / "champion")
-    candidate_results = [int(bool(row["won"])) for row in candidate["battles"]]
-    champion_results = [int(bool(row["won"])) for row in champion["battles"]]
+    candidate_index = _indexed_results(candidate)
+    champion_index = _indexed_results(champion)
+    if candidate_index.keys() != champion_index.keys():
+        raise RuntimeError("Candidate and champion held-out schedules did not align")
+    keys = sorted(candidate_index)
+    candidate_results = [candidate_index[key] for key in keys]
+    champion_results = [champion_index[key] for key in keys]
     candidate_rate = sum(candidate_results) / max(len(candidate_results), 1)
     champion_rate = sum(champion_results) / max(len(champion_results), 1)
     delta = candidate_rate - champion_rate
@@ -151,6 +181,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "win_rate_delta": delta,
         "paired_bootstrap_delta_95": interval,
         "promotion_margin": args.promotion_margin,
+        "concurrent_games": min(args.concurrent_games, args.games),
         "promoted": promoted,
     }
     (args.output_dir / "summary.json").write_text(
@@ -163,3 +194,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> None:
     install_safe_poke_env_shutdown()
     run(build_parser().parse_args(argv))
+
+
+if __name__ == "__main__":
+    main()

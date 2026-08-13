@@ -80,9 +80,7 @@ def _wilson_interval(wins: int, games: int, z: float = 1.959963984540054) -> lis
     center = (proportion + z * z / (2 * games)) / denominator
     margin = (
         z
-        * math.sqrt(
-            proportion * (1 - proportion) / games + z * z / (4 * games * games)
-        )
+        * math.sqrt(proportion * (1 - proportion) / games + z * z / (4 * games * games))
         / denominator
     )
     return [max(center - margin, 0.0), min(center + margin, 1.0)]
@@ -155,8 +153,15 @@ async def _run_battles(
     args: argparse.Namespace,
     output_dir: Path,
     *,
-    external_opponent: ExternalOpponentProcess | None = None,
+    external_opponent: ExternalOpponentProcess | Sequence[ExternalOpponentProcess] | None = None,
 ) -> dict[str, Any]:
+    external_opponents = (
+        []
+        if external_opponent is None
+        else [external_opponent]
+        if isinstance(external_opponent, ExternalOpponentProcess)
+        else list(external_opponent)
+    )
     team = _read_team(args.team_file)
     opponent_team = _read_team(args.opponent_team_file or args.team_file)
     runtime = InteractionPolicyRuntime(
@@ -180,13 +185,13 @@ async def _run_battles(
         trace_writer=trace_writer,
         fail_fast=args.fail_fast,
         battle_format=args.battle_format,
-        max_concurrent_battles=1,
+        max_concurrent_battles=max(len(external_opponents), 1),
         save_replays=str(output_dir / "replays"),
         server_configuration=server_configuration,
         team=team,
     )
     opponent = None
-    if external_opponent is None:
+    if not external_opponents:
         opponent_class = OPPONENTS[args.opponent]
         opponent = opponent_class(
             battle_format=args.battle_format,
@@ -196,44 +201,69 @@ async def _run_battles(
             team=opponent_team,
         )
     try:
-        if external_opponent is None:
+        if not external_opponents:
             assert opponent is not None
             await player.battle_against(opponent, n_battles=args.games)
         else:
-            if external_opponent.challenges_player:
+            if all(manager.challenges_player for manager in external_opponents):
                 deadline = asyncio.get_running_loop().time() + 10.0
                 while not player.ps_client.logged_in.is_set():
                     if asyncio.get_running_loop().time() >= deadline:
-                        raise TimeoutError(
-                            f"{PLAYER_USERNAME} did not log in within 10 seconds"
-                        )
+                        raise TimeoutError(f"{PLAYER_USERNAME} did not log in within 10 seconds")
                     await asyncio.sleep(0.05)
-                external_opponent.start_challenges()
+                for manager in external_opponents:
+                    manager.start_challenges()
                 await player.accept_challenges(
-                    external_opponent.username,
+                    [manager.username for manager in external_opponents],
                     args.games,
                 )
             else:
-                await player.send_challenges(external_opponent.username, args.games)
-            external_opponent.ensure_success()
+                if len(external_opponents) != 1:
+                    raise ValueError("Concurrent external opponents must initiate their challenges")
+                await player.send_challenges(external_opponents[0].username, args.games)
+            for manager in external_opponents:
+                manager.ensure_success()
 
         battles = list(player.battles.values())
         wins = sum(battle.won is True for battle in battles)
         losses = sum(battle.lost is True for battle in battles)
         ties = len(battles) - wins - losses
         foul_play_trace_examples = None
-        if (
-            external_opponent is not None
-            and external_opponent.spec.name == "foul-play"
+        if external_opponents and all(
+            manager.spec.name == "foul-play" for manager in external_opponents
         ):
-            trace_path = external_opponent.teacher_trace_path
-            if trace_path.is_file():
-                with trace_path.open(encoding="utf-8") as stream:
-                    foul_play_trace_examples = sum(
-                        1 for line in stream if line.strip()
-                    )
-            else:
-                foul_play_trace_examples = 0
+            foul_play_trace_examples = 0
+            for manager in external_opponents:
+                trace_path = manager.teacher_trace_path
+                if trace_path.is_file():
+                    with trace_path.open(encoding="utf-8") as stream:
+                        foul_play_trace_examples += sum(1 for line in stream if line.strip())
+        schedules = {
+            manager.username: list(
+                manager.foul_play_team_files or [manager.team_file] * manager.games
+            )
+            for manager in external_opponents
+        }
+        opponent_game_counts: dict[str, int] = {}
+        battle_rows = []
+        for battle in battles:
+            opponent_name = str(battle.opponent_username)
+            game_index = opponent_game_counts.get(opponent_name, 0)
+            opponent_game_counts[opponent_name] = game_index + 1
+            schedule = schedules.get(opponent_name, [])
+            battle_rows.append(
+                {
+                    "battle_id": battle.battle_tag,
+                    "won": battle.won,
+                    "lost": battle.lost,
+                    "turns": battle.turn,
+                    "opponent": opponent_name,
+                    "opponent_game_index": game_index,
+                    "scheduled_enemy_team_file": (
+                        str(schedule[game_index]) if game_index < len(schedule) else None
+                    ),
+                }
+            )
         return {
             "schema": "local-showdown-eval-v1",
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -242,7 +272,13 @@ async def _run_battles(
             "battle_format": args.battle_format,
             "opponent": args.opponent,
             "opponent_implementation": (
-                external_opponent.metadata() if external_opponent is not None else None
+                (
+                    external_opponents[0].metadata()
+                    if len(external_opponents) == 1
+                    else [manager.metadata() for manager in external_opponents]
+                )
+                if external_opponents
+                else None
             ),
             "team_file": str(args.team_file),
             "opponent_team_file": str(args.opponent_team_file or args.team_file),
@@ -257,9 +293,7 @@ async def _run_battles(
             "decisions": player.decision_count,
             "fallbacks": player.fallback_count,
             "fallback_rate": (
-                player.fallback_count / player.decision_count
-                if player.decision_count
-                else 0.0
+                player.fallback_count / player.decision_count if player.decision_count else 0.0
             ),
             "inference_latency_seconds": _latency_summary(player.inference_latencies),
             "lead_policy": (
@@ -268,20 +302,12 @@ async def _run_battles(
                 else "submitted-team-order-slot-1-fallback"
             ),
             "opponent_lead_policy": (
-                external_opponent.metadata()["team_preview"]
-                if external_opponent is not None
+                external_opponents[0].metadata()["team_preview"]
+                if external_opponents
                 else "submitted-team-order-slot-1"
             ),
-            "battles": [
-                {
-                    "battle_id": battle.battle_tag,
-                    "won": battle.won,
-                    "lost": battle.lost,
-                    "turns": battle.turn,
-                    "opponent": battle.opponent_username,
-                }
-                for battle in battles
-            ],
+            "concurrent_games": max(len(external_opponents), 1),
+            "battles": battle_rows,
         }
     finally:
         clients = [player.ps_client]

@@ -30,8 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluation-games", type=int, default=100)
     parser.add_argument("--holdout-teams", type=int, default=3)
     parser.add_argument("--search-time-ms", type=int, default=250)
+    parser.add_argument("--concurrent-games", type=int, default=4)
     parser.add_argument("--distillation-epochs", type=int, default=2)
-    parser.add_argument("--rehearsal-data", type=Path, default=Path("data/gen9ou-interaction-v1/train.jsonl"))
+    parser.add_argument(
+        "--rehearsal-data", type=Path, default=Path("data/gen9ou-interaction-v1/train.jsonl")
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--server-port", type=int, default=8000)
     parser.add_argument("--showdown-dir", type=Path, default=Path("data/pokemon-showdown"))
@@ -75,7 +78,12 @@ def _student_probability(round_index: int, rounds: int) -> float:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.output_dir.exists():
         raise FileExistsError(args.output_dir)
-    if args.rounds <= 0 or args.games_per_round <= 0 or args.evaluation_games <= 0:
+    if (
+        args.rounds <= 0
+        or args.games_per_round <= 0
+        or args.evaluation_games <= 0
+        or args.concurrent_games <= 0
+    ):
         raise ValueError("Round and game counts must be positive")
     enemy_team_files = list(args.enemy_team_file)
     if args.enemy_team_manifest is not None:
@@ -104,6 +112,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "training_enemy_teams": [str(path) for path in training],
         "heldout_enemy_teams": [str(path) for path in holdout],
         "ppo_enabled": False,
+        "concurrent_games": args.concurrent_games,
         "rounds": [],
     }
     (args.output_dir / "manifest.json").write_text(
@@ -122,7 +131,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         collect = [
             python,
             "-m",
-            "pokemon_battler.teacher_collect",
+            "pokemon_battler.parallel_teacher_collect",
             "--enemy-policy",
             "foul-play",
             "--team-file",
@@ -130,6 +139,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             *_team_arguments(training),
             "--games",
             str(args.games_per_round),
+            "--concurrent-games",
+            str(args.concurrent_games),
             "--seed",
             str(args.seed + round_index),
             "--foul-play-search-time-ms",
@@ -183,7 +194,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "2",
         ]
         if args.rehearsal_data.is_file():
-            distill.extend(("--rehearsal-data", str(args.rehearsal_data), "--rehearsal-weight", "0.1"))
+            distill.extend(
+                ("--rehearsal-data", str(args.rehearsal_data), "--rehearsal-weight", "0.1")
+            )
         _run(distill, dry_run=args.dry_run)
         _run(
             [
@@ -213,6 +226,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 *_team_arguments(holdout),
                 "--games",
                 str(args.evaluation_games),
+                "--concurrent-games",
+                str(args.concurrent_games),
                 "--seed",
                 str(args.seed + 10_000),
                 "--foul-play-search-time-ms",

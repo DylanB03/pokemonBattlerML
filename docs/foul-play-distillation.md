@@ -213,6 +213,7 @@ python -m pokemon_battler.win_pipeline \
   --rounds 3 \
   --games-per-round 200 \
   --evaluation-games 100 \
+  --concurrent-games 4 \
   --search-time-ms 250
 ```
 
@@ -224,3 +225,12 @@ paired bootstrap interval is not strongly negative. PPO is deliberately absent
 from this pipeline. It should only be reconsidered after DAgger stops improving
 the held-out suite, because sparse public-game PPO was the least informative and
 most failure-prone update in the previous process.
+
+`--concurrent-games 4` runs four independent battles at once. Teacher collection
+uses four isolated Foul Play pairs and merges their traces with worker-prefixed
+battle IDs. DAgger workers share one loaded Qwen advisor rather than allocating
+four model copies. Held-out evaluation similarly runs four Foul Play opponents
+against one Qwen player, then aligns candidate and champion results by worker,
+game index, and scheduled team. Keep Foul Play search parallelism and search
+threads at one when using battle-level concurrency; increasing both forms of
+parallelism will oversubscribe a 16-thread CPU.
