@@ -110,6 +110,43 @@ class DistillationTests(unittest.TestCase):
         self.assertIsNotNone(q_logits.grad)
         self.assertIsNotNone(value_logits.grad)
 
+    def test_relative_q_ranking_trains_order_without_absolute_calibration(self) -> None:
+        log_probs = torch.full((1, 13), float("-inf"))
+        log_probs[0, 0] = math.log(0.5)
+        log_probs[0, 4] = math.log(0.5)
+        log_probs.requires_grad_()
+        q_logits = torch.zeros((1, 13), requires_grad=True)
+        teacher = torch.zeros((1, 13))
+        teacher[0, 0] = 0.5
+        teacher[0, 4] = 0.5
+        q_targets = torch.zeros((1, 13))
+        q_targets[0, 0] = 0.2
+        q_targets[0, 4] = 0.8
+        legal = torch.zeros((1, 13), dtype=torch.bool)
+        legal[0, [0, 4]] = True
+        loss, metrics = teacher_distillation_loss(
+            {
+                "action_log_probs": log_probs,
+                "action_value_logits": q_logits,
+            },
+            {
+                "teacher_probabilities": teacher,
+                "teacher_action_ids": torch.tensor([0]),
+                "legal_action_mask": legal,
+                "teacher_action_values": q_targets,
+                "teacher_action_value_mask": legal,
+            },
+            family_aux_weight=0.0,
+            action_value_weight=1.0,
+            action_value_loss_type="ranking",
+            root_value_weight=0.0,
+            outcome_value_weight=0.0,
+        )
+        loss.backward()
+        self.assertAlmostEqual(float(metrics["action_value_loss"]), math.log(2), places=5)
+        self.assertGreater(float(q_logits.grad[0, 0]), 0.0)
+        self.assertLess(float(q_logits.grad[0, 4]), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

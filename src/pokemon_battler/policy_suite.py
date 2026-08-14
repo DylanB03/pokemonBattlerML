@@ -38,6 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foul-play-search-threads", type=int, default=1)
     parser.add_argument("--concurrent-games", type=int, default=4)
     parser.add_argument("--promotion-margin", type=float, default=0.0)
+    parser.add_argument("--candidate-action-value-weight", type=float)
+    parser.add_argument("--champion-action-value-weight", type=float)
+    parser.add_argument(
+        "--candidate-preview", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--champion-preview", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--no-bootstrap-server", action="store_true")
     parser.add_argument("--no-bootstrap-opponents", action="store_true")
     return parser
@@ -68,7 +76,16 @@ def _difference_interval(
     return [differences[int(samples * 0.025)], differences[int(samples * 0.975)]]
 
 
-def _arguments(checkpoint: Path, team_file: Path, games: int, port: int) -> Namespace:
+def _arguments(
+    checkpoint: Path,
+    team_file: Path,
+    games: int,
+    port: int,
+    *,
+    action_value_weight: float | None = None,
+    load_preview_head: bool = True,
+    team_preview_policy: str = "learned",
+) -> Namespace:
     return Namespace(
         checkpoint=checkpoint,
         model=None,
@@ -84,6 +101,9 @@ def _arguments(checkpoint: Path, team_file: Path, games: int, port: int) -> Name
         load_in_4bit=None,
         local_files_only=None,
         attn_implementation=None,
+        action_value_weight=action_value_weight,
+        load_preview_head=load_preview_head,
+        team_preview_policy=team_preview_policy,
         fail_fast=True,
     )
 
@@ -93,6 +113,10 @@ def _run_policy(
     checkpoint: Path,
     schedule: list[Path],
     output_dir: Path,
+    *,
+    action_value_weight: float | None = None,
+    load_preview_head: bool = True,
+    team_preview_policy: str = "learned",
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True)
     workers = min(args.concurrent_games, args.games)
@@ -125,7 +149,15 @@ def _run_policy(
             stack.enter_context(manager)
         return asyncio.run(
             _run_battles(
-                _arguments(checkpoint, args.team_file, args.games, args.server_port),
+                _arguments(
+                    checkpoint,
+                    args.team_file,
+                    args.games,
+                    args.server_port,
+                    action_value_weight=action_value_weight,
+                    load_preview_head=load_preview_head,
+                    team_preview_policy=team_preview_policy,
+                ),
                 output_dir,
                 external_opponent=managers,
             )
@@ -151,14 +183,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     teams = resolve_team_pool(args.enemy_team_file, args.enemy_team_dir, minimum_teams=3)
     schedule = _schedule(teams, args.games, args.seed)
     args.output_dir.mkdir(parents=True)
+    candidate_action_value_weight = getattr(args, "candidate_action_value_weight", None)
+    champion_action_value_weight = getattr(args, "champion_action_value_weight", None)
+    candidate_preview = getattr(args, "candidate_preview", True)
+    champion_preview = getattr(args, "champion_preview", True)
     with LocalShowdownServer(
         args.showdown_dir,
         port=args.server_port,
         bootstrap=not args.no_bootstrap_server,
         log_path=args.output_dir / "showdown.log",
     ):
-        candidate = _run_policy(args, args.candidate, schedule, args.output_dir / "candidate")
-        champion = _run_policy(args, args.champion, schedule, args.output_dir / "champion")
+        candidate = _run_policy(
+            args,
+            args.candidate,
+            schedule,
+            args.output_dir / "candidate",
+            action_value_weight=candidate_action_value_weight,
+            load_preview_head=candidate_preview,
+            team_preview_policy="learned" if candidate_preview else "first",
+        )
+        champion = _run_policy(
+            args,
+            args.champion,
+            schedule,
+            args.output_dir / "champion",
+            action_value_weight=champion_action_value_weight,
+            load_preview_head=champion_preview,
+            team_preview_policy="learned" if champion_preview else "first",
+        )
     candidate_index = _indexed_results(candidate)
     champion_index = _indexed_results(champion)
     if candidate_index.keys() != champion_index.keys():
@@ -182,6 +234,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "paired_bootstrap_delta_95": interval,
         "promotion_margin": args.promotion_margin,
         "concurrent_games": min(args.concurrent_games, args.games),
+        "candidate_inference": {
+            "action_value_weight": candidate_action_value_weight,
+            "preview": candidate_preview,
+        },
+        "champion_inference": {
+            "action_value_weight": champion_action_value_weight,
+            "preview": champion_preview,
+        },
         "promoted": promoted,
     }
     (args.output_dir / "summary.json").write_text(

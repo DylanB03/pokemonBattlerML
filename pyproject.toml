@@ -40,6 +40,11 @@ pokemon-preview-train = "pokemon_battler.preview_train:main"
 pokemon-policy-suite = "pokemon_battler.policy_suite:main"
 pokemon-win-pipeline = "pokemon_battler.win_pipeline:main"
 pokemon-parallel-teacher = "pokemon_battler.parallel_teacher_collect:main"
+pokemon-policy-ablation = "pokemon_battler.policy_ablation:main"
+pokemon-selective-data = "pokemon_battler.selective_data:main"
+pokemon-frozen-cache = "pokemon_battler.frozen_cache:main"
+pokemon-cached-distill = "pokemon_battler.cached_distill:main"
+pokemon-gated-run = "pokemon_battler.gated_pipeline:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

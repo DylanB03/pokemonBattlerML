@@ -231,6 +231,7 @@ def teacher_distillation_loss(
     confidence_power: float = 0.0,
     family_aux_weight: float = 0.25,
     action_value_weight: float = 0.25,
+    action_value_loss_type: str = "bce",
     root_value_weight: float = 0.1,
     outcome_value_weight: float = 0.05,
     tera_weight: float = 2.0,
@@ -240,6 +241,8 @@ def teacher_distillation_loss(
         raise ValueError("hard_target_weight must be between zero and one")
     if confident_disagreement_weight < 0 or confidence_power < 0:
         raise ValueError("Distillation weights cannot be negative")
+    if action_value_loss_type not in {"bce", "ranking"}:
+        raise ValueError("action_value_loss_type must be 'bce' or 'ranking'")
     log_probs = outputs["action_log_probs"].float()
     teacher = batch["teacher_probabilities"].to(log_probs.device).float()
     legal = batch["legal_action_mask"].to(log_probs.device).bool()
@@ -300,13 +303,30 @@ def teacher_distillation_loss(
         q_mask = q_mask.to(log_probs.device).bool() & legal
         if bool(q_mask.any()):
             q_targets = batch["teacher_action_values"].to(log_probs.device).float()
-            q_losses = torch.nn.functional.binary_cross_entropy_with_logits(
-                outputs["action_value_logits"].float()[q_mask],
-                q_targets[q_mask],
-                reduction="mean",
-            )
-            action_value_loss = q_losses
-            action_value_examples = q_mask.sum().float()
+            q_logits = outputs["action_value_logits"].float()
+            if action_value_loss_type == "bce":
+                action_value_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                    q_logits[q_mask],
+                    q_targets[q_mask],
+                    reduction="mean",
+                )
+                action_value_examples = q_mask.sum().float()
+            else:
+                target_difference = q_targets[:, :, None] - q_targets[:, None, :]
+                logit_difference = q_logits[:, :, None] - q_logits[:, None, :]
+                pair_mask = q_mask[:, :, None] & q_mask[:, None, :]
+                pair_mask = pair_mask & (
+                    torch.triu(
+                        torch.ones_like(pair_mask[0], dtype=torch.bool), diagonal=1
+                    )[None, :, :]
+                )
+                pair_mask = pair_mask & (target_difference.abs() >= 0.02)
+                if bool(pair_mask.any()):
+                    signs = target_difference[pair_mask].sign()
+                    action_value_loss = torch.nn.functional.softplus(
+                        -signs * logit_difference[pair_mask]
+                    ).mean()
+                    action_value_examples = pair_mask.sum().float()
 
     root_value_loss = policy_loss.new_zeros(())
     root_mask = batch.get("teacher_root_value_mask")

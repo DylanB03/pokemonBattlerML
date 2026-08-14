@@ -97,6 +97,8 @@ class InteractionPolicyRuntime:
         load_in_4bit: bool | None = None,
         local_files_only: bool | None = None,
         attn_implementation: str | None = None,
+        action_value_weight: float | None = None,
+        load_preview_head: bool = True,
     ) -> None:
         self.checkpoint = Path(checkpoint)
         if not has_interaction_head(self.checkpoint):
@@ -148,12 +150,17 @@ class InteractionPolicyRuntime:
             prompt_format=self.prompt_format,
         )
         self.logits_parameter = indexed_logits_parameter(self.model)
-        self.action_value_weight = float(
+        configured_action_value_weight = float(
             metadata.get("deployment_action_value_weight", 0.0) or 0.0
+        )
+        self.action_value_weight = (
+            configured_action_value_weight
+            if action_value_weight is None
+            else float(action_value_weight)
         )
         self.preview_head = None
         self.preview_collator = None
-        if has_team_preview_head(self.checkpoint):
+        if load_preview_head and has_team_preview_head(self.checkpoint):
             self.preview_head = load_team_preview_head(
                 int(self.model.config.hidden_size), self.checkpoint, self.device
             )

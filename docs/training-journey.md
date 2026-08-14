@@ -483,3 +483,33 @@ the best checkpoint, and the final checkpoint in separate directories. That
 does not guarantee a better result. It does mean the next result will test the
 architecture I intended, on the data schema I intended, without quietly
 reusing the old isolated rows.
+
+## I stopped treating a long run as evidence
+
+The first Foul Play distillation round took 22 hours. It improved held-out
+teacher agreement by more than ten points, but its paired battle result was
+only 12 wins against the old model's 9. That was compatible with a real gain and
+with noise. The next round restarted from the rejected checkpoint, added every
+old row to a growing aggregate, and began paying for frozen Qwen again. More
+compute was not making the experiment more convincing.
+
+I replaced that loop with gates. I now test the learned preview and the Q-value
+blend independently before training. I reserve unseen enemy teams for a Foul
+Play ceiling and validation set. From the existing teacher games I keep a
+bounded set of student disagreements, switching decisions, Tera decisions, and
+representative attacks instead of allowing long battles and repeated teams to
+dominate.
+
+The largest mechanical change is simple: frozen means cached. Qwen produces one
+state vector for each selected row once. Several interaction heads can then use
+the same tensors, which turns an objective comparison from a collection of
+day-long jobs into a short experiment. A 256-row memorization check runs first.
+The real variants must improve unseen-team teacher agreement without losing
+more than two points on held-out human replay. Only one surviving variant earns
+a paired 100-game test.
+
+This setup can still reject every model. That is intentional. A stopped run now
+tells me whether the failure was wiring, generalization, replay forgetting, or
+actual battle performance. If a statewise head passes the first three and still
+does not win more games, I have a concrete reason to spend the next round of
+work on full-trajectory memory instead of changing another learning rate.

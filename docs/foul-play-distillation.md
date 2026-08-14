@@ -196,9 +196,28 @@ remain Foul Play's full search targets. Later rounds aggregate all new traces so
 they expand the visited-state distribution instead of repeatedly fitting one
 small batch.
 
-## One end-to-end command
+## Recommended gated command
 
-The recommended command keeps the deployment team fixed, reserves three enemy
+The cumulative multi-round command below is now a legacy reproduction path.
+The first completed round took about 22 hours because frozen Qwen was evaluated
+again for every epoch and every rehearsal batch. Its candidate moved toward the
+teacher offline but did not produce a statistically useful battle improvement.
+
+The recommended command reuses the two completed teacher collections, isolates
+inference ablations, caches frozen Qwen once, trains bounded head variants, and
+stops when an offline gate fails:
+
+```bash
+python -m pokemon_battler.gated_pipeline \
+  --output-dir outputs/qwen-gated-v1
+```
+
+See [Gated Qwen improvement](gated-improvement.md) for the exact defaults and
+outputs.
+
+## Legacy cumulative command
+
+The legacy command keeps the deployment team fixed, reserves three enemy
 compositions that never enter training, performs an expert round followed by
 student-controlled DAgger rounds, trains the corrected turn and preview heads,
 and compares every candidate with the current champion on the identical held-out

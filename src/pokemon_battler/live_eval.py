@@ -128,6 +128,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--prompt-format")
     parser.add_argument(
+        "--action-value-weight",
+        type=float,
+        help=(
+            "Override the checkpoint's deployment Q-logit blend. Use 0 for the "
+            "policy-only ablation."
+        ),
+    )
+    parser.add_argument(
+        "--load-preview-head",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load a learned lead head when the checkpoint contains one.",
+    )
+    parser.add_argument(
+        "--team-preview-policy",
+        choices=("learned", "first", "random"),
+        default="learned",
+    )
+    parser.add_argument(
         "--dtype",
         choices=("auto", "float32", "float16", "bfloat16"),
     )
@@ -173,6 +192,8 @@ async def _run_battles(
         load_in_4bit=args.load_in_4bit,
         local_files_only=args.local_files_only,
         attn_implementation=args.attn_implementation,
+        action_value_weight=getattr(args, "action_value_weight", None),
+        load_preview_head=getattr(args, "load_preview_head", True),
     )
     server_configuration = ServerConfiguration(
         f"ws://localhost:{args.server_port}/showdown/websocket",
@@ -184,6 +205,7 @@ async def _run_battles(
         account_configuration=AccountConfiguration(PLAYER_USERNAME, None),
         trace_writer=trace_writer,
         fail_fast=args.fail_fast,
+        team_preview_policy=getattr(args, "team_preview_policy", "learned"),
         battle_format=args.battle_format,
         max_concurrent_battles=max(len(external_opponents), 1),
         save_replays=str(output_dir / "replays"),

@@ -84,12 +84,34 @@ after every game and fails stalled or illegal-team collections explicitly.
 overwriting the source model. See
 [Foul Play policy distillation](docs/foul-play-distillation.md).
 
-The full win-optimization path is available as `pokemon-win-pipeline`. It adds
-public-information normalization, MCTS policy/Q/value targets, a learned team
-preview head, student-state DAgger, trajectory balancing, replay rehearsal, and
-held-out Foul Play promotion. It keeps the fixed player team and every candidate
-checkpoint, and it does not use a battle engine at deployment time. The exact
-command and artifact layout are documented in the same guide.
+The old cumulative `pokemon-win-pipeline` is retained for reproducibility, but
+it is no longer the recommended training path. It repeatedly recomputes frozen
+Qwen states, grows its dataset every round, and combines preview and Q-value
+changes before proving that either helps in battles.
+
+Use the gated pipeline instead:
+
+```bash
+python -m pokemon_battler.gated_pipeline \
+  --output-dir outputs/qwen-gated-v1
+```
+
+The defaults point at the completed batch-005 champion, the round-00 distilled
+candidate, both existing smart-vs-smart teacher collections, the current replay
+split, and the bundled enemy-team manifest. The command first measures preview
+and Q-blend inference choices independently. It then collects a held-out Foul
+Play ceiling/validation set, selects 8,000 high-information teacher states and
+bounded replay samples, runs frozen Qwen exactly once per selected state, and
+trains three cheap head objectives from the same cache. A memorization gate and
+an unseen-team/replay gate can stop the run before battle evaluation. Only the
+best eligible head receives a 100-game paired test.
+
+No checkpoint is overwritten. `selected_checkpoint.txt` points to the promoted
+model or back to the starting champion, while every rejected model and every
+gate report remains under the run directory. Foul Play and Showdown are used
+only for local collection and evaluation; deployment still loads Qwen and the
+learned PyTorch head. See [Gated Qwen improvement](docs/gated-improvement.md)
+for the rationale, stages, estimates, overrides, and artifact layout.
 
 On the completed 20-game fixed-team samples, the checkpoint scored 20–0 against
 PokéChamp One-Step, 20–0 against PokéChamp Abyssal, and 4–16 against Foul Play's
