@@ -1,5 +1,12 @@
 # Whole-trajectory memory and next-state IQL
 
+> Completed result: this architecture did not beat the batch-005 champion. The
+> recurrent head scored 16/100 against the memoryless head's 22/100, and the
+> memoryless head scored 20/100 against the champion's 21/100. It remains here
+> for reproducibility, but the recommended next experiment is the
+> [conservative champion residual](champion-residual.md), which starts from the
+> champion's actual action distribution instead of replacing it.
+
 This is the first training path in the repository that actually preserves a
 player's consecutive decisions and backs an action value up from the next
 battle state. It is an extension of the existing Qwen interaction policy, not a

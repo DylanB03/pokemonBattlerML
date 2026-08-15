@@ -23,6 +23,7 @@ from pokemon_battler.reinforcement import (
     offline_outcome_loss,
     ppo_loss,
 )
+from pokemon_battler.residual_modeling import has_residual_head
 from pokemon_battler.train import _save_checkpoint, set_seed
 from pokemon_battler.training_data import (
     InteractionCollator,
@@ -271,10 +272,11 @@ def train_ppo_rollouts(
     rollout_source: str = "local-self-play",
 ) -> dict[str, Any]:
     """Run clipped PPO updates from completed on-policy Showdown trajectories."""
-    if has_trajectory_head(checkpoint):
+    if has_trajectory_head(checkpoint) or has_residual_head(checkpoint):
         raise ValueError(
-            "The statewise PPO updater cannot train a trajectory checkpoint. "
-            "Run it frozen; temporal PPO must preserve ordered battle sequences."
+            "The statewise PPO updater cannot preserve an auxiliary trajectory or "
+            "residual policy head. Run this checkpoint frozen or use its matching "
+            "training objective."
         )
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"PPO output directory is not empty: {output_dir}")

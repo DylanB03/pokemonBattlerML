@@ -11,34 +11,39 @@ now uses that checkpoint as a warm start, fits outcome-aware action and state
 values, and then optimizes Qwen directly through self-play PPO. Human-action
 agreement remains diagnostic; promotion is decided by complete-game results.
 
-## Train with whole trajectories and real next-state targets
+## Improve the champion without replacing its policy
 
-The recommended architecture experiment now preserves every observable
-decision in a selected POV, freezes Qwen plus the existing interaction encoder
-once per state, and trains both a memoryless control and a recurrent GRU policy
-with next-state IQL targets:
+The recommended experiment now keeps the batch-005 champion as the complete
+base policy and learns only a bounded correction to its legal-action log
+probabilities:
 
 ```bash
-python -m pokemon_battler.trajectory_pipeline \
-  --output-dir outputs/trajectory-iql-v1
+python -m pokemon_battler.residual_pipeline \
+  --output-dir outputs/champion-residual-v1
 ```
 
-The command prepares schema-4 trajectories, builds memory-mapped encoded
-caches, trains both heads from identical data, compares recurrent against
-memoryless in 100 paired local games, then compares the winner against the
-current batch-005 champion in another paired suite. Qwen is still used at every
-live decision. The recurrent hidden state is isolated per concurrent battle and
-duplicate Showdown requests cannot advance it twice. Every model and report is
-kept separately; `selected_checkpoint.txt` records the result.
+The residual starts at zero, so before training its decisions are the champion's
+decisions. It distills 8,000 high-information Foul Play distributions, validates
+on 2,000 turns from entirely different battles, and regularizes against the
+already-built 317,102-row broad replay cache. Qwen and the interaction encoder
+are run only for the 10,000 selected teacher rows; neither is retrained. The
+candidate must improve held-out teacher metrics without excessive policy drift,
+then beat the champion in a 50-game pilot on three enemy teams absent from
+teacher training, then pass a 100-game paired test over all nine teams.
 
-This specifically fixes two defects in the older path: per-turn sampling had
-left only about 2.25 rows per battle, and the outcome loss had no next state to
-back up from. It does not promise a 51% ladder result; complete-game evaluation
-is still the deciding evidence. See
-[Whole-trajectory memory and next-state IQL](docs/trajectory-iql.md) for the
-schema, reward scale, model contract, objective, artifacts, and smoke command.
-Frozen public play is supported; the old statewise `--learn` PPO path refuses a
-trajectory checkpoint rather than silently training the wrong actor.
+The source checkpoint is never overwritten. `selected_checkpoint.txt` points
+to the source champion from the moment the run starts and changes only if both
+battle gates pass. A failed or interrupted run leaves it on the champion. This
+does not promise a 51% ladder result; it is designed to stop spending full-run
+budgets on actors that have not demonstrated a game-level gain. See
+[Conservative champion residual](docs/champion-residual.md) for the evidence,
+objective, thresholds, artifacts, and smoke command.
+
+The prior recurrent IQL experiment remains reproducible with
+`pokemon_battler.trajectory_pipeline`, but its completed paired evaluation was
+negative and it is no longer the recommended path. Statewise PPO refuses both
+trajectory and residual checkpoints rather than silently deleting their active
+policy head.
 
 See [ROADMAP.md](ROADMAP.md) for the planned progression from behavior cloning
 to model-preference displays, replay review, counterfactual win-probability

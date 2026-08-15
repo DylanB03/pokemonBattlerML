@@ -29,6 +29,10 @@ from pokemon_battler.modeling import (
     load_policy_model,
     load_training_metadata,
 )
+from pokemon_battler.residual_modeling import (
+    has_residual_head,
+    load_residual_head,
+)
 from pokemon_battler.team_preview import (
     TeamPreviewCollator,
     has_team_preview_head,
@@ -154,6 +158,14 @@ class InteractionPolicyRuntime:
         if has_trajectory_head(self.checkpoint):
             self.trajectory_head = load_trajectory_head(self.checkpoint, self.device)
             self.trajectory_head.eval()
+        self.residual_head = None
+        if has_residual_head(self.checkpoint):
+            if self.trajectory_head is not None:
+                raise ValueError(
+                    "A checkpoint cannot deploy trajectory and residual heads together"
+                )
+            self.residual_head = load_residual_head(self.checkpoint, self.device)
+            self.residual_head.eval()
         self.collator = InteractionInferenceCollator(
             self.tokenizer,
             max_length=self.max_length,
@@ -164,8 +176,10 @@ class InteractionPolicyRuntime:
         configured_action_value_weight = float(
             metadata.get("deployment_action_value_weight", 0.0) or 0.0
         )
-        if self.trajectory_head is not None and action_value_weight is None:
-            # IQL already moves the trajectory actor toward high-Q actions.
+        if (
+            self.trajectory_head is not None or self.residual_head is not None
+        ) and action_value_weight is None:
+            # The auxiliary actor already defines the deployed distribution.
             # Do not inherit a Q-blend coefficient tuned for the old head.
             configured_action_value_weight = 0.0
         self.action_value_weight = (
@@ -246,6 +260,17 @@ class InteractionPolicyRuntime:
             returned_hidden = trajectory_outputs["hidden_state"]
             if isinstance(returned_hidden, torch.Tensor):
                 next_hidden = returned_hidden.detach()
+        elif self.residual_head is not None:
+            with torch.inference_mode():
+                residual_outputs = self.residual_head(
+                    outputs["global_embedding"],
+                    outputs["candidate_embeddings"],
+                    batch["legal_action_mask"],
+                    outputs["action_log_probs"],
+                )
+            action_log_probs = residual_outputs["action_log_probs"][0].float().cpu()
+            raw_action_values = outputs["action_value_logits"][0].float().cpu()
+            raw_value = outputs["value_logits"][0].float().cpu()
         else:
             action_log_probs = outputs["action_log_probs"][0].float().cpu()
             raw_action_values = outputs["action_value_logits"][0].float().cpu()

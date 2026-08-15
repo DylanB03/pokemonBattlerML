@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 
 from pokemon_battler.distillation import TEACHER_SCHEMA
-from pokemon_battler.selective_data import select_teacher_rows
+from pokemon_battler.selective_data import (
+    select_disjoint_teacher_rows,
+    select_teacher_rows,
+)
 
 
 def row(
@@ -43,6 +46,40 @@ def row(
 
 
 class SelectiveDataTests(unittest.TestCase):
+    def test_disjoint_selection_holds_out_whole_battles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "teacher.jsonl"
+            rows = [
+                row(
+                    f"battle-{battle}",
+                    battle % 9,
+                    behavior_action=(battle + 1) % 9,
+                    confidence=0.8,
+                    team=f"team-{battle % 4}",
+                )
+                for battle in range(40)
+                for _ in range(2)
+            ]
+            path.write_text(
+                "".join(json.dumps(value) + "\n" for value in rows), encoding="utf-8"
+            )
+            train, validation, report = select_disjoint_teacher_rows(
+                [path],
+                train_limit=40,
+                validation_limit=12,
+                seed=7,
+                validation_fraction=0.25,
+                battle_cap=2,
+            )
+            self.assertTrue(train)
+            self.assertTrue(validation)
+            self.assertTrue(
+                {reference.battle_id for reference in train}.isdisjoint(
+                    reference.battle_id for reference in validation
+                )
+            )
+            self.assertEqual(report["strategy"], "whole-battle-hash")
+
     def test_student_disagreement_has_priority_within_action_family(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "teacher.jsonl"

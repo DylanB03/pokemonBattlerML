@@ -121,6 +121,7 @@ def _bounded_candidates(
     limit: int,
     seed: int,
     representative: bool,
+    included_battles: set[str] | None = None,
 ) -> tuple[list[RowReference], int]:
     heaps: dict[str, list[tuple[float, int, str, int, RowReference]]] = defaultdict(list)
     seen = 0
@@ -130,6 +131,8 @@ def _bounded_candidates(
     for reference in _iter_teacher_references(
         paths, seed=seed, representative=representative
     ):
+        if included_battles is not None and reference.battle_id not in included_battles:
+            continue
         seen += 1
         key = "all" if representative else reference.family
         heap = heaps[key]
@@ -200,11 +203,16 @@ def select_teacher_rows(
     seed: int,
     battle_cap: int = 24,
     representative: bool = False,
+    included_battles: set[str] | None = None,
 ) -> tuple[list[RowReference], dict[str, Any]]:
     if limit <= 0 or battle_cap <= 0:
         raise ValueError("Teacher selection limits must be positive")
     candidates, seen = _bounded_candidates(
-        paths, limit=limit, seed=seed, representative=representative
+        paths,
+        limit=limit,
+        seed=seed,
+        representative=representative,
+        included_battles=included_battles,
     )
     if representative:
         selected = _balanced_take(candidates, limit, battle_cap=battle_cap)
@@ -251,6 +259,68 @@ def select_teacher_rows(
         "representative": representative,
     }
     return selected, report
+
+
+def select_disjoint_teacher_rows(
+    paths: Sequence[Path],
+    *,
+    train_limit: int,
+    validation_limit: int,
+    seed: int,
+    validation_fraction: float = 0.2,
+    battle_cap: int = 24,
+) -> tuple[list[RowReference], list[RowReference], dict[str, Any]]:
+    """Select train/validation rows after splitting whole battles by hash."""
+    if not 0 < validation_fraction < 0.5:
+        raise ValueError("validation_fraction must be between zero and 0.5")
+    battle_ids = {
+        reference.battle_id
+        for reference in _iter_teacher_references(
+            paths, seed=seed, representative=True
+        )
+    }
+    if len(battle_ids) < 2:
+        raise ValueError("Teacher data needs at least two battles")
+    threshold = int(validation_fraction * 2**64)
+    validation_battles = {
+        battle_id
+        for battle_id in battle_ids
+        if _stable_integer(seed, "validation", battle_id) < threshold
+    }
+    if not validation_battles or validation_battles == battle_ids:
+        ordered = sorted(
+            battle_ids, key=lambda battle_id: _stable_integer(seed, "fallback", battle_id)
+        )
+        validation_count = min(
+            len(ordered) - 1, max(1, round(len(ordered) * validation_fraction))
+        )
+        validation_battles = set(ordered[:validation_count])
+    train_battles = battle_ids - validation_battles
+    train, train_report = select_teacher_rows(
+        paths,
+        limit=train_limit,
+        seed=seed,
+        battle_cap=battle_cap,
+        included_battles=train_battles,
+    )
+    validation, validation_report = select_teacher_rows(
+        paths,
+        limit=validation_limit,
+        seed=seed + 1,
+        battle_cap=battle_cap,
+        representative=True,
+        included_battles=validation_battles,
+    )
+    report = {
+        "strategy": "whole-battle-hash",
+        "validation_fraction": validation_fraction,
+        "available_battles": len(battle_ids),
+        "train_battles": len(train_battles),
+        "validation_battles": len(validation_battles),
+        "train": train_report,
+        "validation": validation_report,
+    }
+    return train, validation, report
 
 
 def _copy_references(rows: Sequence[RowReference], output: Path) -> None:

@@ -224,6 +224,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             manifest["phases"]["champion_evaluation"] = champion
+            if not champion["promoted"]:
+                selected = args.checkpoint
         else:
             recurrent_objective = float(
                 manifest["phases"]["recurrent_train"]["best_validation_objective"]

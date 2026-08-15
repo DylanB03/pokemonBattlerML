@@ -49,6 +49,8 @@ pokemon-trajectory-prepare = "pokemon_battler.trajectory_prepare:main"
 pokemon-trajectory-cache = "pokemon_battler.trajectory_cache:main"
 pokemon-trajectory-train = "pokemon_battler.trajectory_train:main"
 pokemon-trajectory-run = "pokemon_battler.trajectory_pipeline:main"
+pokemon-residual-cache = "pokemon_battler.residual_cache:main"
+pokemon-residual-run = "pokemon_battler.residual_pipeline:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]
