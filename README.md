@@ -11,6 +11,35 @@ now uses that checkpoint as a warm start, fits outcome-aware action and state
 values, and then optimizes Qwen directly through self-play PPO. Human-action
 agreement remains diagnostic; promotion is decided by complete-game results.
 
+## Train with whole trajectories and real next-state targets
+
+The recommended architecture experiment now preserves every observable
+decision in a selected POV, freezes Qwen plus the existing interaction encoder
+once per state, and trains both a memoryless control and a recurrent GRU policy
+with next-state IQL targets:
+
+```bash
+python -m pokemon_battler.trajectory_pipeline \
+  --output-dir outputs/trajectory-iql-v1
+```
+
+The command prepares schema-4 trajectories, builds memory-mapped encoded
+caches, trains both heads from identical data, compares recurrent against
+memoryless in 100 paired local games, then compares the winner against the
+current batch-005 champion in another paired suite. Qwen is still used at every
+live decision. The recurrent hidden state is isolated per concurrent battle and
+duplicate Showdown requests cannot advance it twice. Every model and report is
+kept separately; `selected_checkpoint.txt` records the result.
+
+This specifically fixes two defects in the older path: per-turn sampling had
+left only about 2.25 rows per battle, and the outcome loss had no next state to
+back up from. It does not promise a 51% ladder result; complete-game evaluation
+is still the deciding evidence. See
+[Whole-trajectory memory and next-state IQL](docs/trajectory-iql.md) for the
+schema, reward scale, model contract, objective, artifacts, and smoke command.
+Frozen public play is supported; the old statewise `--learn` PPO path refuses a
+trajectory checkpoint rather than silently training the wrong actor.
+
 See [ROADMAP.md](ROADMAP.md) for the planned progression from behavior cloning
 to model-preference displays, replay review, counterfactual win-probability
 analysis, regret estimation, and grounded coaching.

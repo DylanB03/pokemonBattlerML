@@ -36,6 +36,12 @@ from pokemon_battler.team_preview import (
     load_team_preview_head,
 )
 from pokemon_battler.training_data import InteractionInferenceCollator
+from pokemon_battler.trajectory_modeling import (
+    has_trajectory_head,
+    load_trajectory_head,
+)
+from pokemon_battler.trajectory_prepare import PREVIOUS_ACTION_SENTINEL
+from pokemon_battler.trajectory_rewards import shaped_reward_from_event
 
 _HTML_TAG = re.compile(r"<[^>]*>")
 _RATING_UPDATE = re.compile(
@@ -81,6 +87,7 @@ class InteractionPrediction:
     entropy: float
     value_probability: float
     latency_seconds: float
+    hidden_state: torch.Tensor | None = None
 
 
 class InteractionPolicyRuntime:
@@ -143,6 +150,10 @@ class InteractionPolicyRuntime:
         self.model.eval()
         self.head = load_interaction_head(self.model, self.checkpoint, self.device)
         self.head.eval()
+        self.trajectory_head = None
+        if has_trajectory_head(self.checkpoint):
+            self.trajectory_head = load_trajectory_head(self.checkpoint, self.device)
+            self.trajectory_head.eval()
         self.collator = InteractionInferenceCollator(
             self.tokenizer,
             max_length=self.max_length,
@@ -153,6 +164,10 @@ class InteractionPolicyRuntime:
         configured_action_value_weight = float(
             metadata.get("deployment_action_value_weight", 0.0) or 0.0
         )
+        if self.trajectory_head is not None and action_value_weight is None:
+            # IQL already moves the trajectory actor toward high-Q actions.
+            # Do not inherit a Q-blend coefficient tuned for the old head.
+            configured_action_value_weight = 0.0
         self.action_value_weight = (
             configured_action_value_weight
             if action_value_weight is None
@@ -194,6 +209,9 @@ class InteractionPolicyRuntime:
         *,
         sample: bool = False,
         temperature: float = 1.0,
+        hidden_state: torch.Tensor | None = None,
+        previous_action: int = PREVIOUS_ACTION_SENTINEL,
+        previous_reward: float = 0.0,
     ) -> InteractionPrediction:
         if temperature <= 0:
             raise ValueError("temperature must be positive")
@@ -209,13 +227,40 @@ class InteractionPolicyRuntime:
                 batch,
                 logits_parameter=self.logits_parameter,
             )
-        action_log_probs = outputs["action_log_probs"][0].float().cpu()
+        next_hidden: torch.Tensor | None = None
+        if self.trajectory_head is not None:
+            with torch.inference_mode():
+                trajectory_outputs = self.trajectory_head.step(
+                    outputs["global_embedding"],
+                    outputs["candidate_embeddings"],
+                    batch["legal_action_mask"],
+                    torch.tensor([previous_action], device=self.device),
+                    torch.tensor([previous_reward], device=self.device),
+                    hidden_state=hidden_state,
+                )
+            action_log_probs = trajectory_outputs["action_log_probs"][0, 0].float().cpu()
+            raw_action_values = torch.minimum(
+                trajectory_outputs["q1"], trajectory_outputs["q2"]
+            )[0, 0].float().cpu()
+            raw_value = trajectory_outputs["values"][0, 0].float().cpu()
+            returned_hidden = trajectory_outputs["hidden_state"]
+            if isinstance(returned_hidden, torch.Tensor):
+                next_hidden = returned_hidden.detach()
+        else:
+            action_log_probs = outputs["action_log_probs"][0].float().cpu()
+            raw_action_values = outputs["action_value_logits"][0].float().cpu()
+            raw_value = outputs["value_logits"][0].float().cpu()
         legal = [int(value) for value in row["legal_action_ids"]]
-        action_value_logits = outputs["action_value_logits"][0].float().cpu()
-        action_values = {
-            action_id: float(torch.sigmoid(action_value_logits[action_id]).item())
-            for action_id in legal
-        }
+        if self.trajectory_head is not None:
+            action_values = {
+                action_id: float(((raw_action_values[action_id] + 1.0) / 2.0).clamp(0, 1))
+                for action_id in legal
+            }
+        else:
+            action_values = {
+                action_id: float(torch.sigmoid(raw_action_values[action_id]).item())
+                for action_id in legal
+            }
         log_probabilities = {
             action_id: float(action_log_probs[action_id].item()) for action_id in legal
         }
@@ -224,7 +269,7 @@ class InteractionPolicyRuntime:
         sampling_log_probabilities = {
             action_id: (
                 log_probability
-                + self.action_value_weight * float(action_value_logits[action_id].item())
+                + self.action_value_weight * float(raw_action_values[action_id].item())
             )
             / temperature
             for action_id, log_probability in log_probabilities.items()
@@ -266,8 +311,10 @@ class InteractionPolicyRuntime:
             for probability in preferences.values()
             if probability > 0
         )
-        value_probability = float(
-            torch.sigmoid(outputs["value_logits"][0].float()).cpu().item()
+        value_probability = (
+            float(((raw_value + 1.0) / 2.0).clamp(0, 1).item())
+            if self.trajectory_head is not None
+            else float(torch.sigmoid(raw_value).item())
         )
         return InteractionPrediction(
             action_id=action_id,
@@ -277,6 +324,7 @@ class InteractionPolicyRuntime:
             entropy=entropy,
             value_probability=value_probability,
             latency_seconds=perf_counter() - started,
+            hidden_state=next_hidden,
         )
 
 
@@ -333,6 +381,10 @@ class InteractionPlayer(Player):
         self.decision_count = 0
         self.fallback_count = 0
         self.inference_latencies: list[float] = []
+        self.temporal_hidden: dict[str, torch.Tensor | None] = {}
+        self.temporal_previous_action: dict[str, int] = {}
+        self.temporal_last_turn: dict[str, int] = {}
+        self.temporal_last_prediction: dict[str, InteractionPrediction] = {}
         super().__init__(**player_kwargs)
 
     def teampreview(self, battle: AbstractBattle) -> str:
@@ -429,17 +481,43 @@ class InteractionPlayer(Player):
         fallback_reason: str | None = None
         try:
             row = tracker.observe(battle)
-            prediction = self.runtime.predict(
-                row,
-                sample=self.sample_actions,
-                temperature=self.sampling_temperature,
+            turn_index = int(row["turn_index"])
+            new_temporal_turn = not (
+                self.runtime.trajectory_head is not None
+                and self.temporal_last_turn.get(battle.battle_tag) == turn_index
             )
+            if not new_temporal_turn:
+                # Showdown can resend an identical request. Reuse both the sampled
+                # action and post-turn hidden state instead of advancing memory twice.
+                prediction = self.temporal_last_prediction[battle.battle_tag]
+            else:
+                history = row.get("history_events") or []
+                previous_reward = (
+                    shaped_reward_from_event(history[-1]) if history else 0.0
+                )
+                prediction = self.runtime.predict(
+                    row,
+                    sample=self.sample_actions,
+                    temperature=self.sampling_temperature,
+                    hidden_state=self.temporal_hidden.get(battle.battle_tag),
+                    previous_action=self.temporal_previous_action.get(
+                        battle.battle_tag, PREVIOUS_ACTION_SENTINEL
+                    ),
+                    previous_reward=previous_reward,
+                )
             order = live_action_to_order(battle, prediction.action_id)
             if order is None:
                 raise ValueError(
                     f"Predicted {action_label(prediction.action_id)} could not be mapped "
                     "back to the current Showdown request"
                 )
+            if self.runtime.trajectory_head is not None and new_temporal_turn:
+                # Commit temporal state only after the action has mapped to a
+                # valid Showdown order. A fallback must not enter model memory.
+                self.temporal_hidden[battle.battle_tag] = prediction.hidden_state
+                self.temporal_previous_action[battle.battle_tag] = prediction.action_id
+                self.temporal_last_turn[battle.battle_tag] = turn_index
+                self.temporal_last_prediction[battle.battle_tag] = prediction
             self.inference_latencies.append(prediction.latency_seconds)
             if self.decision_callback is not None:
                 self.decision_callback(
@@ -501,3 +579,10 @@ class InteractionPlayer(Player):
                     "rating_update": rating_update,
                 }
             )
+        for name in (
+            "temporal_hidden",
+            "temporal_previous_action",
+            "temporal_last_turn",
+            "temporal_last_prediction",
+        ):
+            getattr(self, name, {}).pop(battle.battle_tag, None)

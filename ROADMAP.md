@@ -105,6 +105,12 @@ Implemented:
   clipped PPO, value clipping, entropy, and KL monitoring.
 - A persistent frozen-Qwen league, promotion matches, non-overwriting candidate
   checkpoints, lead rotations, and a single win-training command.
+- Schema-4 whole-POV preparation with consecutive next states, semi-Markov gaps,
+  small transition rewards, and terminal-only dominant win/loss rewards.
+- A memory-mapped frozen Qwen-plus-interaction representation cache and matched
+  memoryless/recurrent candidate-policy comparison.
+- Two-critic next-state IQL with recurrent burn-in, per-battle live GRU state,
+  duplicate-request protection, and paired complete-game selection.
 
 Not yet implemented:
 

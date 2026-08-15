@@ -45,6 +45,10 @@ pokemon-selective-data = "pokemon_battler.selective_data:main"
 pokemon-frozen-cache = "pokemon_battler.frozen_cache:main"
 pokemon-cached-distill = "pokemon_battler.cached_distill:main"
 pokemon-gated-run = "pokemon_battler.gated_pipeline:main"
+pokemon-trajectory-prepare = "pokemon_battler.trajectory_prepare:main"
+pokemon-trajectory-cache = "pokemon_battler.trajectory_cache:main"
+pokemon-trajectory-train = "pokemon_battler.trajectory_train:main"
+pokemon-trajectory-run = "pokemon_battler.trajectory_pipeline:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

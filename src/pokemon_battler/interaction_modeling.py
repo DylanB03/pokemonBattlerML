@@ -330,6 +330,12 @@ class InteractionPolicyHead(torch.nn.Module):
             "action_value_logits": self.action_value_scorer(candidate_output)
             .squeeze(-1)
             .masked_fill(~candidate_mask, float("-inf")),
+            # These are the frozen per-turn representations consumed by the
+            # trajectory policy.  Returning them here keeps the expensive Qwen
+            # and interaction encoder identical between the old memoryless
+            # policy, the cache builder, and live inference.
+            "global_embedding": global_output,
+            "candidate_embeddings": candidate_output,
         }
 
 

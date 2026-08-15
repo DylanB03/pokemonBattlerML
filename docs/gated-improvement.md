@@ -155,11 +155,11 @@ after measuring peak allocation. `--concurrent-games 4` already uses battle
 parallelism; increasing Foul Play's internal threads at the same time will
 oversubscribe this machine.
 
-## What this does not build yet
+## What this path does not build
 
 This is the fastest reliable test of the current statewise architecture. It
 does not add full-battle recurrent memory, perform public online learning, or
-unfreeze Qwen. If a correctly wired cached head passes its offline gates but
-cannot improve paired battles, the next justified change is trajectory memory
-and long-horizon value training—not another larger pass over the same isolated
-states.
+unfreeze Qwen. The separate
+[whole-trajectory memory and next-state IQL](trajectory-iql.md) pipeline now
+implements the trajectory experiment that this diagnostic identified as the
+next justified change.

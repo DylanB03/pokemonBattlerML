@@ -28,6 +28,7 @@ from pokemon_battler.training_data import (
     InteractionCollator,
     JsonlOffsetDataset,
 )
+from pokemon_battler.trajectory_modeling import has_trajectory_head
 
 
 def _autocast(device: torch.device, dtype: torch.dtype) -> Any:
@@ -270,6 +271,11 @@ def train_ppo_rollouts(
     rollout_source: str = "local-self-play",
 ) -> dict[str, Any]:
     """Run clipped PPO updates from completed on-policy Showdown trajectories."""
+    if has_trajectory_head(checkpoint):
+        raise ValueError(
+            "The statewise PPO updater cannot train a trajectory checkpoint. "
+            "Run it frozen; temporal PPO must preserve ordered battle sequences."
+        )
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"PPO output directory is not empty: {output_dir}")
     if epochs <= 0 or batch_size <= 0 or gradient_accumulation_steps <= 0:
