@@ -3,8 +3,9 @@
 *The model's mediocre results forced me to rethink the loss, the action
 representation, and what I was willing to call a result.*
 
-*Status: August 2026. I stopped the candidate-ranking run at step 5,000 and
-built the mechanics-conditioned experiment that follows it.*
+*Status: August 2026. The best selected checkpoint is still the public-PPO
+`batch-005` candidate. Five hundred public games and three later training
+approaches have not shown that it can reach a positive ladder win rate.*
 
 The unfine-tuned model's first answer to a battle prompt looked like this:
 
@@ -513,3 +514,247 @@ tells me whether the failure was wiring, generalization, replay forgetting, or
 actual battle performance. If a statewise head passes the first three and still
 does not win more games, I have a concrete reason to spend the next round of
 work on full-trajectory memory instead of changing another learning rate.
+
+## The gates rejected every later attempt
+
+That last sentence described the experiment I wanted. The results were less
+encouraging.
+
+The public campaign played 500 rated games in five sets of 100. It finished
+178-322, or 35.6%, with a 95% Wilson interval of 31.5% to 39.9%. No set had a
+positive record. The five results were 39%, 28%, 38%, 40%, and 33%.
+
+Those numbers also exposed how weak a single 100-game result is. The
+`batch-001` checkpoint scored 28% and 38% in consecutive sets. `batch-003`
+scored 40% and then 33%. The opponent pool and my rating changed during the
+run, but that is exactly the point: the maximum of several ladder sets is not a
+clean estimate of model strength. If I run until I see 51%, I am selecting for
+luck unless the pooled record and rating trend rise too.
+
+PPO produced three locally promoted candidates during that campaign. The last
+one, `batch-005`, beat `batch-003` 24-16 in a 40-game local mirror match. It was
+then selected as champion. The campaign stopped before `batch-005` played a
+public set of its own, so I do not have a public win rate for it. Calling it the
+best model means it is the winner of the checkpoint-selection chain, not that
+it has proved itself on the ladder.
+
+I tried three more ways to beat it:
+
+- A Foul Play DAgger candidate won 12 of 100 held-out games while the incumbent
+  won 9 of its 100. The paired evidence was too weak to promote it.
+- The trajectory IQL experiment improved validation action accuracy to about
+  44%, but the selected memoryless policy won 20 of 100 held-out games and
+  `batch-005` won 21. The recurrent version did worse than the memoryless one in
+  its architecture test.
+- The final residual policy made a large improvement in soft teacher KL and a
+  1.15-point improvement in teacher top-1 agreement. In the held-out battle
+  test it tied `batch-005` exactly, 4-46 against 4-46. Its selection pointer was
+  correctly left on `batch-005`.
+
+The residual result was the clearest warning about my metrics. It changed the
+top action on only 119 of 2,000 teacher-validation states, while making the
+whole distribution less confident. That was enough to reduce KL from the
+teacher, but the live policy chooses the top legal action. Better probabilities
+below rank one did almost nothing to the deployed behavior. I had improved a
+loss without improving the decisions that played the games.
+
+## Why this is failing
+
+The main failure is that I trained several proxies for winning and kept hoping
+that one of them would turn into win rate.
+
+Human action cloning asks, “What did this player choose?” Foul Play
+distillation asks, “What did this search policy choose in this local state?”
+PPO on a small public batch asks, “Which sampled actions happened to precede a
+win?” None of those questions is the same as, “Which legal action maximizes the
+chance of winning this battle against this opponent?” They can be useful
+training signals, but I treated movement in their losses as stronger evidence
+than it was.
+
+The public trace shows the practical result. After removing forced switches,
+the policy made 9,435 attacks, 1,228 switches, and 54 Tera actions. That is
+88.0% attack, 11.5% switch, and 0.5% Tera. Across the five batches, the attack
+rate rose from 86.3% to 89.2%. The bot did switch, so the issue was not a broken
+action mapper. It learned an extremely conservative distribution over the
+strategically unusual actions. This matches the replay evaluation, where Tera
+was rare and switch accuracy lagged attack accuracy. Cross-entropy rewards the
+common attack class thousands of times and barely punishes a policy that almost
+never takes a rare but decisive action.
+
+The 13 legal outputs hide another hard problem. `A1` does not mean one move
+across the dataset; it means the second move in the current sorted list. A
+switch action also changes identity when the available roster changes. The
+interaction head receives mechanics and identities for the candidates, but the
+policy still has to infer long-term value from a compressed state. Immediate
+damage is easy to learn. Preserving a win condition, scouting a set, timing
+Tera, accepting a sacrifice, or switching now to avoid losing three turns later
+is much harder.
+
+The state is only partially observed. An opponent's unrevealed moves, item,
+ability, Tera type, and plan matter. A strong player carries a distribution over
+those possibilities and updates it throughout the battle. Four recent events
+and one Qwen state vector are not a real belief state. The recurrent experiment
+added memory, but the training data and objective did not force that memory to
+represent hidden sets or opponent intent. Adding a GRU does not create the
+missing supervision.
+
+The public PPO loop is especially sample-starved. One batch has 100 terminal
+win/loss labels spread over thousands of decisions. A loss does not say which
+of twenty decisions caused it, and a win does not make every decision good.
+The opponent population changes, the ladder rating changes, and action sampling
+adds another source of variance. Updating a 0.5B policy from that signal can
+move it without teaching it why it won. The local promotion gate then tests a
+40-game mirror match with the same fixed team on both sides. It can detect a
+large regression in that matchup, but it is too small and too narrow to prove
+an improvement against varied human teams.
+
+The fixed player team helped control one source of variance and let the policy
+specialize. It also means the public-learning stage has mostly optimized one
+team's action distribution. Public opponents brought varied teams, while local
+promotions used the same team for candidate and champion. That mismatch made
+promotion cheaper, but less predictive of the result I cared about.
+
+Teacher distillation had a related mismatch. Foul Play can search a local
+simulator state using mechanics code. The student gets the resulting action
+distribution and tries to compress it into its policy. A few hundred games
+cover a tiny fraction of team matchups, revealed sets, and turn sequences.
+Reusing those rows more often increases fit to that sample; it does not create
+new strategic coverage. Soft logits add information about the teacher's
+alternatives, but the residual run showed that matching them can improve KL
+while leaving the greedy move almost unchanged.
+
+There is also a capacity limit, although the evidence does not isolate it
+cleanly. Qwen2.5-0.5B has to compress a long structured state, hidden-information
+clues, candidate identities, and history into a small representation. The
+mechanics-v2 change improved exact action agreement from 36.52% to 41.89% on
+the fixed comparison, which proves representation was a major bottleneck.
+Later architectures then stalled around 44%. A larger model might reason over
+the state better, but it would still inherit sparse rewards, biased data, and
+weak evaluation. More parameters alone would make the same experiment slower,
+not make its target correct.
+
+## What I can conclude, and what I cannot
+
+I can conclude that this training recipe has not produced a positive-win-rate
+ladder policy. The 500-game record is far enough below 50% that this is not a
+close miss. I can also conclude that the later teacher, trajectory, and
+residual runs did not beat the selected public checkpoint under their own
+promotion rules.
+
+I cannot conclude that 35.6% is the exact strength of every checkpoint. Two
+runs of the same checkpoint differed by seven to ten points, and `batch-005`
+has no public batch. I also cannot say the 0.5B base model is the sole cause.
+The strongest measured gain came from better inputs, while the strongest
+measured failures came from objectives and gates that did not match deployed
+play.
+
+Offline action accuracy is not a scaled version of win rate. A 44% policy is
+not “close” to a published agent with a 49% battle win rate. Accuracy compares
+one action with one logged action. Win rate evaluates an entire sequence and
+allows many different good actions. A policy can have lower imitation accuracy
+and win more, or match common human actions and still lose every important
+position.
+
+## What would realistically have to change
+
+If I resumed the project, I would stop another long run unless it changed the
+data-generating process or the decision target.
+
+First, I would build a proper benchmark before more training. I would freeze
+`batch-005`, `batch-003`, and the pre-public Qwen policy, then run paired seeds
+across many player and opponent teams. Each candidate would face the same
+initial states and opponent policies. Promotion would require a confidence
+interval above zero over at least several hundred paired games, plus no
+regression on the public replay set. A 24-16 mirror result would be treated as a
+pilot, not a championship.
+
+Second, I would generate orders of magnitude more strategic labels. The useful
+unit is not a random teacher action. For each state I would run a stronger
+search teacher with several opponent-set hypotheses and save action values or
+visit counts for every legal action. I would deliberately oversample positions
+where switching, Tera, setup, hazard control, recovery, and sacrifice decisions
+matter. The model would then learn rankings and value gaps, not only the
+teacher's argmax. This is expensive, but it addresses the behavior visible in
+the traces.
+
+Third, I would give the policy an explicit belief and planning representation.
+The state should track possible opponent items, abilities, moves, speed ranges,
+and Tera types as distributions updated by revealed events. Candidate scoring
+should include short-horizon outcome estimates: expected damage, knockout
+chance, status and hazard changes, likely reply, and the value of the resulting
+next state. This can still use Qwen as an encoder. It should not expect one
+language-model vector to discover all of those calculations from action labels.
+
+Fourth, I would change the objective and the deployment gate together. A new
+policy must improve top-action ranking on high-impact held-out states, rare
+action recall, calibration, and paired battle score. Soft KL can remain a
+secondary metric. It cannot promote a model by itself. Public learning would
+need a much larger replay buffer, off-policy correction, opponent and team
+diversity, and enough games to estimate whether a change is real. I would keep
+the public ladder as evaluation data until the local system showed a clear,
+repeatable gain.
+
+Finally, I would reconsider the 0.5B constraint only after that benchmark and
+dataset existed. A controlled comparison between the same structured policy
+with Qwen 0.5B, a larger encoder, and no Qwen would tell me what the language
+model contributes. Right now, replacing it would mix model capacity with every
+other unresolved variable.
+
+These changes are closer to building a search-informed competitive agent than
+fine-tuning a small language model. That is the realistic scope of getting past
+50%. If I keep the rule that the policy must learn without a battle-search
+engine at inference time, the search still has a useful role during data
+generation. Refusing both inference-time search and large-scale search labels
+leaves the student trying to discover long-horizon Pokémon strategy from sparse
+actions and a few hundred wins. The results give me no reason to expect that to
+work.
+
+## The checkpoint I would test now
+
+The best-supported checkpoint currently available is:
+
+```text
+outputs/public-learning/positive-winrate-1000/batch-005/candidate
+```
+
+I would use it for the next test because it is the end of the accepted
+direct-comparison chain. It beat `batch-003` 24-16 locally, and every later
+candidate was rejected. It is not proven better on the public ladder; that
+missing measurement is exactly what the next frozen run should collect.
+The highest previous 100-game public set was `batch-003` at 40%, but the same
+checkpoint scored 33% in its next set. I do not have evidence that those two
+models are cleanly ordered on public play.
+
+For one deterministic 100-game measurement, I would run:
+
+```bash
+python -m pokemon_battler.public_play \
+  --mode ladder \
+  --games 100 \
+  --checkpoint outputs/public-learning/positive-winrate-1000/batch-005/candidate \
+  --output-dir reports/public/batch005-frozen-100-001
+```
+
+That command does not train. It measures one frozen greedy policy, which makes
+the result interpretable. A second frozen set needs a new output directory, and
+I should pool the sets instead of reporting only the highest one.
+
+If I specifically want to repeat the old learn-between-sets campaign, starting
+from `batch-005`, the command is:
+
+```bash
+python -m pokemon_battler.public_play \
+  --mode ladder \
+  --games 100 \
+  --batches 10 \
+  --stop-win-rate 0.5 \
+  --learn \
+  --checkpoint outputs/public-learning/positive-winrate-1000/batch-005/candidate \
+  --output-dir outputs/public-learning/batch005-campaign-002
+```
+
+That second command answers a different question because a promoted PPO
+candidate can become the source for the next set. It reports each 100-game
+record and the aggregate, but the highest set may belong to a different model.
+Given the results so far, I would run the frozen command first and would not
+treat “keep going until one set is positive” as evidence of improvement.
