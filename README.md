@@ -29,7 +29,8 @@ already-built 317,102-row broad replay cache. Qwen and the interaction encoder
 are run only for the 10,000 selected teacher rows; neither is retrained. The
 candidate must improve held-out teacher metrics without excessive policy drift,
 then beat the champion in a 50-game pilot on three enemy teams absent from
-teacher training, then pass a 100-game paired test over all nine teams. The
+teacher training, then pass a 500-game-per-policy paired test over all nine
+teams. The
 final paired bootstrap interval must have a lower bound above zero; a merely
 positive observed delta is not enough to promote.
 

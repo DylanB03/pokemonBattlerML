@@ -71,7 +71,7 @@ class ResidualPolicyTests(unittest.TestCase):
         self.assertEqual(args.teacher_train_rows, 8_000)
         self.assertEqual(args.replay_train_rows, 32_000)
         self.assertEqual(args.pilot_games, 50)
-        self.assertEqual(args.final_games, 100)
+        self.assertEqual(args.final_games, 500)
         self.assertFalse(args.skip_battle_evaluation)
 
     def test_final_gate_rejects_a_positive_delta_with_inconclusive_interval(self) -> None:

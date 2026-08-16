@@ -141,11 +141,13 @@ same Foul Play team schedule, using only the three unseen enemy teams. If the
 candidate does not produce a positive delta with the repository's paired
 bootstrap guard, the run stops.
 
-If it passes, a second gate runs 100 paired games over all nine enemy teams. Its
-observed win-rate delta must be positive and the lower end of the paired 95%
-bootstrap interval must be above zero. A positive result whose interval still
-includes zero is rejected as inconclusive. The source champion remains selected
-in every other case.
+If it passes, a second gate runs 500 games per policy over all nine enemy teams.
+Its observed win-rate delta must be positive and the lower end of the paired
+95% bootstrap interval must be above zero. A positive result whose interval
+still includes zero is rejected as inconclusive. The larger final budget is
+spent only after the cheap gates pass; 100 games was too underpowered for this
+strict promotion rule. The source champion remains selected in every other
+case.
 
 This is intentionally conservative because a 51% target cannot be established
 from training loss, teacher agreement, or one noisy win-rate sample. A positive

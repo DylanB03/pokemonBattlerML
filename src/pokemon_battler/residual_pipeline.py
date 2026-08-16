@@ -394,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--maximum-replay-kl", type=float, default=0.05)
     parser.add_argument("--maximum-replay-action-change", type=float, default=0.15)
     parser.add_argument("--pilot-games", type=int, default=50)
-    parser.add_argument("--final-games", type=int, default=100)
+    parser.add_argument("--final-games", type=int, default=500)
     parser.add_argument("--concurrent-games", type=int, default=4)
     parser.add_argument("--search-time-ms", type=int, default=250)
     parser.add_argument("--seed", type=int, default=42)
