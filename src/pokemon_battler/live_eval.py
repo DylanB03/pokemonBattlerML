@@ -291,6 +291,13 @@ async def _run_battles(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "checkpoint": str(args.checkpoint),
             "model": runtime.model_name,
+            "policy_architecture": (
+                "trajectory"
+                if runtime.trajectory_head is not None
+                else "residual"
+                if runtime.residual_head is not None
+                else "interaction"
+            ),
             "battle_format": args.battle_format,
             "opponent": args.opponent,
             "opponent_implementation": (

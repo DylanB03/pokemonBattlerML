@@ -6,19 +6,27 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
 from safetensors.torch import save_file
 
 from pokemon_battler.frozen_cache import checkpoint_signature
+from pokemon_battler.policy_suite import _should_promote
 from pokemon_battler.residual_cache import RESIDUAL_ARRAY_SPECS, RESIDUAL_CACHE_SCHEMA
 from pokemon_battler.residual_modeling import (
     ResidualPolicyHead,
     load_champion_scorer,
     load_residual_head,
 )
-from pokemon_battler.residual_pipeline import build_parser
+from pokemon_battler.residual_pipeline import (
+    _manifest_teams,
+    _validate_source_and_replay_caches,
+    build_parser,
+    run as run_residual_pipeline,
+)
 from pokemon_battler.residual_train import train_residual_policy
 from pokemon_battler.trajectory_cache import ARRAY_SPECS, TRAJECTORY_CACHE_SCHEMA
 
@@ -65,6 +73,205 @@ class ResidualPolicyTests(unittest.TestCase):
         self.assertEqual(args.pilot_games, 50)
         self.assertEqual(args.final_games, 100)
         self.assertFalse(args.skip_battle_evaluation)
+
+    def test_final_gate_rejects_a_positive_delta_with_inconclusive_interval(self) -> None:
+        self.assertFalse(
+            _should_promote(
+                0.04,
+                [-0.01, 0.09],
+                promotion_margin=0.0,
+                minimum_interval_lower=0.0,
+            )
+        )
+        self.assertFalse(
+            _should_promote(
+                0.04,
+                [0.0, 0.08],
+                promotion_margin=0.0,
+                minimum_interval_lower=0.0,
+            )
+        )
+        self.assertTrue(
+            _should_promote(
+                0.04,
+                [0.01, 0.08],
+                promotion_margin=0.0,
+                minimum_interval_lower=0.0,
+            )
+        )
+
+    def test_preflight_rejects_a_replay_cache_from_another_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "interaction_head.safetensors").write_bytes(b"head")
+            for split in ("train", "validation"):
+                cache = root / split
+                cache.mkdir()
+                (cache / "metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "schema": TRAJECTORY_CACHE_SCHEMA,
+                            "checkpoint_signature": "wrong",
+                            "rows": 10,
+                            "d_model": 8,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ValueError, "not encoded by the selected"):
+                _validate_source_and_replay_caches(
+                    checkpoint, root / "train", root / "validation"
+                )
+
+    def test_preflight_rejects_silently_stacking_over_a_residual_champion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "interaction_head.safetensors").write_bytes(b"head")
+            (checkpoint / "residual_head.safetensors").write_bytes(b"residual")
+            (checkpoint / "residual_config.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "plain interaction champion"):
+                _validate_source_and_replay_caches(
+                    checkpoint, root / "unused-train", root / "unused-validation"
+                )
+
+    @staticmethod
+    def _selected_teacher_references() -> list[SimpleNamespace]:
+        teams = _manifest_teams(
+            Path("examples/opponent-pools/gen9ou-foul-play.txt")
+        )
+        training = [
+            team
+            for team in teams
+            if team.name not in {"gen9ou6.txt", "gen9ou7.txt", "gen9ou8.txt"}
+        ]
+        return [SimpleNamespace(team=str(team)) for team in training]
+
+    def test_pipeline_promotes_only_after_both_gates_and_writes_absolute_pointer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            args = build_parser().parse_args(["--output-dir", str(output)])
+            references = self._selected_teacher_references()
+            with (
+                patch(
+                    "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                    return_value=(references, references, {"strategy": "test"}),
+                ),
+                patch("pokemon_battler.residual_pipeline._copy_references"),
+                patch(
+                    "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                    return_value={"rows": 1},
+                ),
+                patch(
+                    "pokemon_battler.residual_pipeline.train_residual_policy",
+                    return_value={"offline_gate": {"passed": True}},
+                ),
+                patch(
+                    "pokemon_battler.residual_pipeline.run_policy_suite",
+                    side_effect=[{"promoted": True}, {"promoted": True}],
+                ) as suite,
+                patch("pokemon_battler.residual_pipeline._release_memory"),
+                redirect_stdout(io.StringIO()),
+            ):
+                report = run_residual_pipeline(args)
+            candidate = (output / "03-residual-candidate").resolve()
+            self.assertTrue(report["promoted"])
+            self.assertEqual(report["selected_checkpoint"], str(candidate))
+            self.assertEqual(
+                (output / "selected_checkpoint.txt").read_text().strip(),
+                str(candidate),
+            )
+            self.assertEqual(suite.call_count, 2)
+            pilot_args = suite.call_args_list[0].args[0]
+            final_args = suite.call_args_list[1].args[0]
+            self.assertEqual(pilot_args.minimum_delta_interval_lower, -0.05)
+            self.assertEqual(final_args.minimum_delta_interval_lower, 0.0)
+
+    def test_pipeline_failure_restores_absolute_champion_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            args = build_parser().parse_args(["--output-dir", str(output)])
+            references = self._selected_teacher_references()
+            with (
+                patch(
+                    "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                    return_value=(references, references, {"strategy": "test"}),
+                ),
+                patch("pokemon_battler.residual_pipeline._copy_references"),
+                patch(
+                    "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                    return_value={"rows": 1},
+                ),
+                patch(
+                    "pokemon_battler.residual_pipeline.train_residual_policy",
+                    side_effect=RuntimeError("deliberate failure"),
+                ),
+                patch("pokemon_battler.residual_pipeline._release_memory"),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "deliberate failure"):
+                    run_residual_pipeline(args)
+            champion = args.checkpoint.resolve()
+            self.assertEqual(
+                (output / "selected_checkpoint.txt").read_text().strip(),
+                str(champion),
+            )
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(manifest["selected_checkpoint"], str(champion))
+
+    def test_offline_or_pilot_rejection_never_selects_the_candidate(self) -> None:
+        for offline_passed, suite_results, expected_decision in (
+            (False, [], "offline_gate_failed"),
+            (True, [{"promoted": False}], "heldout_pilot_failed"),
+        ):
+            with self.subTest(expected_decision=expected_decision):
+                with tempfile.TemporaryDirectory() as temporary:
+                    output = Path(temporary) / "run"
+                    args = build_parser().parse_args(["--output-dir", str(output)])
+                    references = self._selected_teacher_references()
+                    with (
+                        patch(
+                            "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                            return_value=(
+                                references,
+                                references,
+                                {"strategy": "test"},
+                            ),
+                        ),
+                        patch("pokemon_battler.residual_pipeline._copy_references"),
+                        patch(
+                            "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                            return_value={"rows": 1},
+                        ),
+                        patch(
+                            "pokemon_battler.residual_pipeline.train_residual_policy",
+                            return_value={
+                                "offline_gate": {"passed": offline_passed}
+                            },
+                        ),
+                        patch(
+                            "pokemon_battler.residual_pipeline.run_policy_suite",
+                            side_effect=suite_results,
+                        ) as suite,
+                        patch("pokemon_battler.residual_pipeline._release_memory"),
+                        redirect_stdout(io.StringIO()),
+                    ):
+                        report = run_residual_pipeline(args)
+                    champion = args.checkpoint.resolve()
+                    self.assertFalse(report["promoted"])
+                    self.assertEqual(report["selected_checkpoint"], str(champion))
+                    self.assertEqual(report["promotion_decision"], expected_decision)
+                    self.assertEqual(suite.call_count, len(suite_results))
+                    self.assertEqual(
+                        (output / "selected_checkpoint.txt").read_text().strip(),
+                        str(champion),
+                    )
 
     def test_tiny_cached_training_writes_reloadable_residual(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

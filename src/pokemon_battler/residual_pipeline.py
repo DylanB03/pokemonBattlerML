@@ -11,20 +11,25 @@ from typing import Any
 
 import torch
 
+from pokemon_battler.frozen_cache import checkpoint_signature
 from pokemon_battler.gated_pipeline import (
     DEFAULT_CHAMPION,
     DEFAULT_ENEMY_MANIFEST,
     DEFAULT_TEACHER_FILES,
 )
 from pokemon_battler.live_eval import DEFAULT_TEAM
+from pokemon_battler.modeling import has_interaction_head
 from pokemon_battler.policy_suite import run as run_policy_suite
 from pokemon_battler.residual_cache import build_residual_teacher_cache
+from pokemon_battler.residual_modeling import has_residual_head
 from pokemon_battler.residual_train import train_residual_policy
 from pokemon_battler.selective_data import (
     _copy_references,
     select_disjoint_teacher_rows,
 )
 from pokemon_battler.team_pool import resolve_team_pool
+from pokemon_battler.trajectory_cache import TRAJECTORY_CACHE_SCHEMA
+from pokemon_battler.trajectory_modeling import has_trajectory_head
 
 DEFAULT_REPLAY_TRAIN_CACHE = Path(
     "outputs/trajectory-iql-v1/02-encoded-cache/train"
@@ -65,6 +70,7 @@ def _suite_arguments(
     showdown_dir: Path,
     opponents_dir: Path,
     server_port: int,
+    minimum_delta_interval_lower: float,
 ) -> Namespace:
     return Namespace(
         candidate=candidate,
@@ -83,6 +89,7 @@ def _suite_arguments(
         foul_play_search_threads=1,
         concurrent_games=concurrent_games,
         promotion_margin=0.0,
+        minimum_delta_interval_lower=minimum_delta_interval_lower,
         candidate_action_value_weight=0.0,
         champion_action_value_weight=0.0,
         candidate_preview=False,
@@ -100,8 +107,53 @@ def _write_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:
 
 def _write_selection(output_dir: Path, checkpoint: Path) -> None:
     (output_dir / "selected_checkpoint.txt").write_text(
-        str(checkpoint) + "\n", encoding="utf-8"
+        str(checkpoint.resolve()) + "\n", encoding="utf-8"
     )
+
+
+def _validate_source_and_replay_caches(
+    checkpoint: Path,
+    train_cache: Path,
+    validation_cache: Path,
+) -> dict[str, Any]:
+    if not has_interaction_head(checkpoint):
+        raise ValueError("Residual training requires an interaction-policy checkpoint")
+    if has_trajectory_head(checkpoint) or has_residual_head(checkpoint):
+        raise ValueError(
+            "This pipeline currently requires a plain interaction champion; stacking "
+            "a new residual over an auxiliary policy would not reproduce its deployed "
+            "starting distribution."
+        )
+    signature = checkpoint_signature(checkpoint)
+    cache_reports: dict[str, Any] = {}
+    d_models: set[int] = set()
+    for split, cache_dir in (("train", train_cache), ("validation", validation_cache)):
+        metadata_path = cache_dir / "metadata.json"
+        if not metadata_path.is_file():
+            raise FileNotFoundError(metadata_path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("schema") != TRAJECTORY_CACHE_SCHEMA:
+            raise ValueError(f"{split} replay cache uses an incompatible schema")
+        if metadata.get("checkpoint_signature") != signature:
+            raise ValueError(
+                f"{split} replay cache was not encoded by the selected champion; "
+                "refusing to build teacher embeddings against mismatched features"
+            )
+        d_model = int(metadata["d_model"])
+        d_models.add(d_model)
+        cache_reports[split] = {
+            "path": str(cache_dir.resolve()),
+            "rows": int(metadata["rows"]),
+            "d_model": d_model,
+            "checkpoint_signature": str(metadata["checkpoint_signature"]),
+        }
+    if len(d_models) != 1:
+        raise ValueError("Train and validation replay caches use different embedding sizes")
+    return {
+        "source_checkpoint": str(checkpoint.resolve()),
+        "checkpoint_signature": signature,
+        "replay_caches": cache_reports,
+    }
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -122,8 +174,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.pilot_games <= 0 or args.final_games <= 0:
         raise ValueError("Battle gate game counts must be positive")
     all_enemy_teams = _manifest_teams(args.enemy_team_manifest)
+    source_checkpoint = args.checkpoint.resolve()
+    preflight = _validate_source_and_replay_caches(
+        source_checkpoint, args.replay_train_cache, args.replay_validation_cache
+    )
     args.output_dir.mkdir(parents=True)
-    selected_checkpoint = args.checkpoint
+    selected_checkpoint = source_checkpoint
     _write_selection(args.output_dir, selected_checkpoint)
     data_dir = args.output_dir / "01-selected-teacher"
     cache_dir = args.output_dir / "02-teacher-cache"
@@ -134,14 +190,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "champion-residual-pipeline-v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
-        "source_checkpoint": str(args.checkpoint),
+        "source_checkpoint": str(source_checkpoint),
         "selected_checkpoint": str(selected_checkpoint),
         "safety_contract": {
             "initial_policy": "exact champion distribution",
             "source_checkpoint_is_immutable": True,
             "battle_gate_required_for_promotion": True,
         },
-        "phases": {},
+        "phases": {"preflight": preflight},
     }
     _write_manifest(args.output_dir, manifest)
     try:
@@ -175,7 +231,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         cache_dir.mkdir()
         manifest["phases"]["teacher_train_cache"] = build_residual_teacher_cache(
-            checkpoint=args.checkpoint,
+            checkpoint=source_checkpoint,
             data_file=train_file,
             output_dir=cache_dir / "train",
             batch_size=args.cache_batch_size,
@@ -187,7 +243,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _release_memory()
         _write_manifest(args.output_dir, manifest)
         manifest["phases"]["teacher_validation_cache"] = build_residual_teacher_cache(
-            checkpoint=args.checkpoint,
+            checkpoint=source_checkpoint,
             data_file=validation_file,
             output_dir=cache_dir / "validation",
             batch_size=args.cache_batch_size,
@@ -200,7 +256,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _write_manifest(args.output_dir, manifest)
 
         training_report = train_residual_policy(
-            checkpoint=args.checkpoint,
+            checkpoint=source_checkpoint,
             teacher_train_cache=cache_dir / "train",
             teacher_validation_cache=cache_dir / "validation",
             replay_train_cache=args.replay_train_cache,
@@ -236,7 +292,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pilot = run_policy_suite(
                 _suite_arguments(
                     candidate=candidate_dir,
-                    champion=args.checkpoint,
+                    champion=source_checkpoint,
                     output_dir=pilot_dir,
                     team_file=args.team_file,
                     enemy_teams=heldout_teams,
@@ -247,6 +303,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     showdown_dir=args.showdown_dir,
                     opponents_dir=args.opponents_dir,
                     server_port=args.server_port,
+                    minimum_delta_interval_lower=-0.05,
                 )
             )
             manifest["phases"]["heldout_pilot"] = pilot
@@ -257,7 +314,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 final = run_policy_suite(
                     _suite_arguments(
                         candidate=candidate_dir,
-                        champion=args.checkpoint,
+                        champion=source_checkpoint,
                         output_dir=final_dir,
                         team_file=args.team_file,
                         enemy_teams=all_enemy_teams,
@@ -268,17 +325,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         showdown_dir=args.showdown_dir,
                         opponents_dir=args.opponents_dir,
                         server_port=args.server_port,
+                        minimum_delta_interval_lower=0.0,
                     )
                 )
                 manifest["phases"]["full_battle_gate"] = final
                 if final["promoted"]:
-                    selected_checkpoint = candidate_dir
+                    selected_checkpoint = candidate_dir.resolve()
                     promotion_decision = "promoted"
             else:
                 promotion_decision = "heldout_pilot_failed"
         manifest["selected_checkpoint"] = str(selected_checkpoint)
-        manifest["candidate_checkpoint"] = str(candidate_dir)
-        manifest["promoted"] = selected_checkpoint == candidate_dir
+        manifest["candidate_checkpoint"] = str(candidate_dir.resolve())
+        manifest["promoted"] = selected_checkpoint == candidate_dir.resolve()
         manifest["promotion_decision"] = promotion_decision
         manifest["status"] = "complete"
         _write_selection(args.output_dir, selected_checkpoint)
@@ -288,8 +346,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     except Exception as exc:
         manifest["status"] = "failed"
         manifest["error"] = f"{type(exc).__name__}: {exc}"
-        manifest["selected_checkpoint"] = str(args.checkpoint)
-        _write_selection(args.output_dir, args.checkpoint)
+        manifest["selected_checkpoint"] = str(source_checkpoint)
+        _write_selection(args.output_dir, source_checkpoint)
         _write_manifest(args.output_dir, manifest)
         raise
 

@@ -103,6 +103,13 @@ Only the 10,000 teacher rows need a new Qwen and interaction-encoder pass. They
 are written as memory-mapped global and candidate embeddings. Residual training
 after that is a small PyTorch-head job and does not load Qwen.
 
+Before creating the run directory, the command verifies that both caches use
+the selected checkpoint's exact signature and embedding size. It also refuses
+a source checkpoint that already contains a trajectory or residual actor. That
+restriction is deliberate: silently stacking a new correction over an
+auxiliary policy would make the cached starting distribution differ from the
+one used in live play.
+
 ## Training and offline gate
 
 The objective has three terms:
@@ -114,7 +121,9 @@ soft teacher cross-entropy
 ```
 
 Teacher rows receive a modest confidence weight. Validation is run after every
-epoch, the best epoch is restored, and training stops after three stale epochs.
+epoch, the best replay-preserving epoch is restored, and training stops after
+three stale epochs. A lower teacher loss can never displace an earlier eligible
+checkpoint if it violates either replay-drift limit.
 The candidate can proceed only if:
 
 - teacher KL improves by at least 0.02, or teacher top-1 agreement improves by
@@ -132,9 +141,11 @@ same Foul Play team schedule, using only the three unseen enemy teams. If the
 candidate does not produce a positive delta with the repository's paired
 bootstrap guard, the run stops.
 
-If it passes, a second gate runs 100 paired games over all nine enemy teams. The
-candidate is promoted only when that report has `promoted: true`. The source
-champion remains selected in every other case.
+If it passes, a second gate runs 100 paired games over all nine enemy teams. Its
+observed win-rate delta must be positive and the lower end of the paired 95%
+bootstrap interval must be above zero. A positive result whose interval still
+includes zero is rejected as inconclusive. The source champion remains selected
+in every other case.
 
 This is intentionally conservative because a 51% target cannot be established
 from training loss, teacher agreement, or one noisy win-rate sample. A positive
@@ -163,7 +174,8 @@ outputs/champion-residual-v1/
 ```
 
 `selected_checkpoint.txt` is written before data preparation. It initially
-contains the source champion, remains there if an exception occurs, and changes
+contains the source champion's absolute path, remains there if an exception
+occurs, and changes
 to `03-residual-candidate` only after the final battle gate passes. The candidate
 and all rejection evidence remain available either way.
 
@@ -195,6 +207,9 @@ The existing live runtime detects `residual_head.safetensors`, obtains the base
 Qwen interaction outputs, and applies the correction before selecting an action.
 No teacher or search engine is used at inference. Action values remain the
 champion's frozen diagnostic values and are not blended into selection.
+Local and paired-battle summaries record `policy_architecture: residual`, so a
+run cannot silently look like it exercised the correction when it loaded only
+the interaction policy.
 
 The old statewise PPO updater refuses a residual checkpoint because it only
 knows how to update the interaction policy. Allowing it to run would silently

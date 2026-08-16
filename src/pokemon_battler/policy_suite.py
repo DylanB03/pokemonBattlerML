@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foul-play-search-threads", type=int, default=1)
     parser.add_argument("--concurrent-games", type=int, default=4)
     parser.add_argument("--promotion-margin", type=float, default=0.0)
+    parser.add_argument("--minimum-delta-interval-lower", type=float, default=-0.05)
     parser.add_argument("--candidate-action-value-weight", type=float)
     parser.add_argument("--champion-action-value-weight", type=float)
     parser.add_argument(
@@ -74,6 +75,16 @@ def _difference_interval(
         )
     differences.sort()
     return [differences[int(samples * 0.025)], differences[int(samples * 0.975)]]
+
+
+def _should_promote(
+    delta: float,
+    interval: Sequence[float],
+    *,
+    promotion_margin: float,
+    minimum_interval_lower: float,
+) -> bool:
+    return delta > promotion_margin and interval[0] > minimum_interval_lower
 
 
 def _arguments(
@@ -222,7 +233,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     champion_rate = sum(champion_results) / max(len(champion_results), 1)
     delta = candidate_rate - champion_rate
     interval = _difference_interval(candidate_results, champion_results, seed=args.seed)
-    promoted = delta > args.promotion_margin and interval[0] >= -0.05
+    minimum_interval_lower = float(
+        getattr(args, "minimum_delta_interval_lower", -0.05)
+    )
+    promoted = _should_promote(
+        delta,
+        interval,
+        promotion_margin=args.promotion_margin,
+        minimum_interval_lower=minimum_interval_lower,
+    )
     report = {
         "schema": "heldout-foul-play-promotion-v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -233,6 +252,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "win_rate_delta": delta,
         "paired_bootstrap_delta_95": interval,
         "promotion_margin": args.promotion_margin,
+        "minimum_delta_interval_lower": minimum_interval_lower,
         "concurrent_games": min(args.concurrent_games, args.games),
         "candidate_inference": {
             "action_value_weight": candidate_action_value_weight,

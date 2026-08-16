@@ -29,11 +29,14 @@ already-built 317,102-row broad replay cache. Qwen and the interaction encoder
 are run only for the 10,000 selected teacher rows; neither is retrained. The
 candidate must improve held-out teacher metrics without excessive policy drift,
 then beat the champion in a 50-game pilot on three enemy teams absent from
-teacher training, then pass a 100-game paired test over all nine teams.
+teacher training, then pass a 100-game paired test over all nine teams. The
+final paired bootstrap interval must have a lower bound above zero; a merely
+positive observed delta is not enough to promote.
 
 The source checkpoint is never overwritten. `selected_checkpoint.txt` points
 to the source champion from the moment the run starts and changes only if both
-battle gates pass. A failed or interrupted run leaves it on the champion. This
+battle gates pass. The pointer contains an absolute path. A failed or
+interrupted run leaves it on the champion. This
 does not promise a 51% ladder result; it is designed to stop spending full-run
 budgets on actors that have not demonstrated a game-level gain. See
 [Conservative champion residual](docs/champion-residual.md) for the evidence,

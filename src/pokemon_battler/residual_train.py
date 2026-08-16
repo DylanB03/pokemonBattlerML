@@ -342,9 +342,23 @@ def train_residual_policy(
             updates += 1
         teacher_metrics = _evaluate_teacher(head, validation_loader, device)
         replay_metrics = _evaluate_replay(head, scorer, replay_validation_loader, device)
-        score = teacher_metrics["kl"] + 10.0 * max(
-            0.0, replay_metrics["kl_from_champion"] - maximum_replay_kl
+        replay_eligible = (
+            replay_metrics["kl_from_champion"] <= maximum_replay_kl
+            and replay_metrics["top_action_change_rate"]
+            <= maximum_replay_action_change
         )
+        replay_violation = max(
+            0.0, replay_metrics["kl_from_champion"] - maximum_replay_kl
+        ) + max(
+            0.0,
+            replay_metrics["top_action_change_rate"]
+            - maximum_replay_action_change,
+        )
+        # Any preservation-eligible epoch outranks every ineligible epoch. This
+        # prevents a later low-teacher-KL/high-drift model from replacing an
+        # earlier checkpoint that could actually proceed to the battle gate.
+        score = teacher_metrics["kl"] + (0.0 if replay_eligible else 1_000.0)
+        score += replay_violation
         row = {
             "epoch": epoch,
             "train_teacher_cross_entropy": totals["teacher"] / totals["examples"],
@@ -352,6 +366,7 @@ def train_residual_policy(
             "train_residual_penalty": totals["penalty"] / totals["examples"],
             "teacher_validation": teacher_metrics,
             "replay_validation": replay_metrics,
+            "replay_eligible": replay_eligible,
             "selection_score": score,
         }
         history.append(row)
