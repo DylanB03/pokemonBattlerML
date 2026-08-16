@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+from bisect import bisect_right
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -45,7 +46,13 @@ def state_with_row_context(row: dict[str, Any]) -> dict[str, Any]:
 class JsonlOffsetDataset(Dataset[dict[str, Any]]):
     """Random-access JSONL without holding the prepared states in memory."""
 
-    def __init__(self, path: str | Path, limit: int | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        limit: int | None = None,
+        *,
+        cache_offsets: bool = False,
+    ) -> None:
         self.path = Path(path)
         self._stream: BinaryIO | None = None
         self._stream_process_id: int | None = None
@@ -54,17 +61,77 @@ class JsonlOffsetDataset(Dataset[dict[str, Any]]):
         if limit is not None and limit <= 0:
             raise ValueError("limit must be positive")
 
-        self.offsets: list[int] = []
-        with self.path.open("rb") as stream:
-            while limit is None or len(self.offsets) < limit:
-                offset = stream.tell()
-                line = stream.readline()
-                if not line:
-                    break
-                if line.strip():
-                    self.offsets.append(offset)
-        if not self.offsets:
+        self.offsets: list[int] | np.ndarray[Any, Any]
+        cached = self._load_offset_cache() if cache_offsets and limit is None else None
+        if cached is not None:
+            self.offsets = cached
+        else:
+            offsets: list[int] = []
+            with self.path.open("rb") as stream:
+                while limit is None or len(offsets) < limit:
+                    offset = stream.tell()
+                    line = stream.readline()
+                    if not line:
+                        break
+                    if line.strip():
+                        offsets.append(offset)
+            self.offsets = offsets
+            if cache_offsets and limit is None:
+                self._write_offset_cache(offsets)
+        if len(self.offsets) == 0:
             raise ValueError(f"Dataset contains no examples: {self.path}")
+
+    @property
+    def _offset_cache_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".offsets.npy")
+
+    @property
+    def _offset_metadata_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".offsets.json")
+
+    def _source_signature(self) -> dict[str, int]:
+        stat = self.path.stat()
+        return {"bytes": stat.st_size, "modified_ns": stat.st_mtime_ns}
+
+    def _load_offset_cache(self) -> np.ndarray[Any, Any] | None:
+        if not self._offset_cache_path.is_file() or not self._offset_metadata_path.is_file():
+            return None
+        try:
+            metadata = json.loads(self._offset_metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("source") != self._source_signature():
+                return None
+            offsets = np.load(self._offset_cache_path, mmap_mode="r")
+            if offsets.ndim != 1 or offsets.dtype != np.uint64:
+                return None
+            if int(metadata.get("rows", -1)) != int(offsets.shape[0]):
+                return None
+            return offsets
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _write_offset_cache(self, offsets: list[int]) -> None:
+        array_partial = self._offset_cache_path.with_suffix(
+            self._offset_cache_path.suffix + ".partial"
+        )
+        metadata_partial = self._offset_metadata_path.with_suffix(
+            self._offset_metadata_path.suffix + ".partial"
+        )
+        try:
+            with array_partial.open("wb") as stream:
+                np.save(stream, np.asarray(offsets, dtype=np.uint64))
+            metadata_partial.write_text(
+                json.dumps(
+                    {"source": self._source_signature(), "rows": len(offsets)},
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.replace(array_partial, self._offset_cache_path)
+            os.replace(metadata_partial, self._offset_metadata_path)
+        finally:
+            array_partial.unlink(missing_ok=True)
+            metadata_partial.unlink(missing_ok=True)
 
     def __len__(self) -> int:
         return len(self.offsets)
@@ -80,7 +147,7 @@ class JsonlOffsetDataset(Dataset[dict[str, Any]]):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         stream = self._reader()
-        stream.seek(self.offsets[index])
+        stream.seek(int(self.offsets[index]))
         line = stream.readline()
         row = json.loads(line)
         if "state" not in row or "action_id" not in row:
@@ -97,6 +164,58 @@ class JsonlOffsetDataset(Dataset[dict[str, Any]]):
         stream = getattr(self, "_stream", None)
         if stream is not None:
             stream.close()
+
+
+class ShardedJsonlDataset(Dataset[dict[str, Any]]):
+    """Random access over a directory of JSONL parts without concatenating them."""
+
+    def __init__(self, path: str | Path, *, limit: int | None = None) -> None:
+        self.path = Path(path)
+        if not self.path.is_dir():
+            raise NotADirectoryError(self.path)
+        files = sorted(self.path.glob("*.jsonl"))
+        if not files:
+            raise ValueError(f"No JSONL shards found in {self.path}")
+        self.shards: list[JsonlOffsetDataset] = []
+        self.ends: list[int] = []
+        remaining = limit
+        total = 0
+        for file in files:
+            if remaining is not None and remaining <= 0:
+                break
+            shard = JsonlOffsetDataset(file, limit=remaining, cache_offsets=True)
+            self.shards.append(shard)
+            total += len(shard)
+            self.ends.append(total)
+            if remaining is not None:
+                remaining -= len(shard)
+        if not self.shards:
+            raise ValueError(f"No examples found in JSONL shards under {self.path}")
+
+    def __len__(self) -> int:
+        return self.ends[-1]
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        shard_index = bisect_right(self.ends, index)
+        start = 0 if shard_index == 0 else self.ends[shard_index - 1]
+        return self.shards[shard_index][index - start]
+
+
+def open_jsonl_dataset(
+    path: str | Path,
+    *,
+    limit: int | None = None,
+    cache_offsets: bool = False,
+) -> Dataset[dict[str, Any]]:
+    """Open either one legacy JSONL file or a directory of prepared shards."""
+    source = Path(path)
+    if source.is_dir():
+        return ShardedJsonlDataset(source, limit=limit)
+    return JsonlOffsetDataset(source, limit=limit, cache_offsets=cache_offsets)
 
 
 class MechanicsCacheDataset(Dataset[dict[str, Any]]):

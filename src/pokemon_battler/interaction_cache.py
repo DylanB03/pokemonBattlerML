@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import shutil
 import time
@@ -21,7 +21,7 @@ from pokemon_battler.interaction_features import (
     INTERACTION_VOCAB_SIZES,
     POKEMON_ID_FIELDS,
     POKEMON_NUMERIC_NAMES,
-    PREPARED_SCHEMA_VERSION,
+    SUPPORTED_PREPARED_SCHEMA_VERSIONS,
     build_interaction_features,
 )
 from pokemon_battler.mechanics_v2 import (
@@ -109,7 +109,9 @@ def interaction_cache_is_current(data_file: str | Path, cache_dir: str | Path) -
         rows = int(metadata["rows"])
         if metadata.get("cache_schema") != INTERACTION_CACHE_SCHEMA:
             return False
-        if int(metadata.get("prepared_schema_version", -1)) != PREPARED_SCHEMA_VERSION:
+        if int(metadata.get("prepared_schema_version", -1)) not in (
+            SUPPORTED_PREPARED_SCHEMA_VERSIONS
+        ):
             return False
         if metadata.get("schema_fingerprint") != _schema_fingerprint():
             return False
@@ -152,6 +154,11 @@ def build_interaction_cache(
             partial.unlink()
 
     dataset = JsonlOffsetDataset(source)
+    prepared_schema_version = int(dataset[0].get("schema_version", -1))
+    if prepared_schema_version not in SUPPORTED_PREPARED_SCHEMA_VERSIONS:
+        raise ValueError(
+            f"Unsupported prepared schema version: {prepared_schema_version}"
+        )
     partial.mkdir(parents=True)
     arrays: dict[str, np.ndarray[Any, Any]] = {
         name: np.lib.format.open_memmap(
@@ -185,7 +192,7 @@ def build_interaction_cache(
         arrays.clear()
         metadata = {
             "cache_schema": INTERACTION_CACHE_SCHEMA,
-            "prepared_schema_version": PREPARED_SCHEMA_VERSION,
+            "prepared_schema_version": prepared_schema_version,
             "schema_fingerprint": _schema_fingerprint(),
             "schema_descriptor": _schema_descriptor(),
             "rows": len(dataset),
@@ -235,7 +242,9 @@ class InteractionCacheDataset(Dataset[dict[str, Any]]):
         self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if self.metadata.get("cache_schema") != INTERACTION_CACHE_SCHEMA:
             raise ValueError("Interaction cache schema does not match this code")
-        if int(self.metadata.get("prepared_schema_version", -1)) != PREPARED_SCHEMA_VERSION:
+        if int(self.metadata.get("prepared_schema_version", -1)) not in (
+            SUPPORTED_PREPARED_SCHEMA_VERSIONS
+        ):
             raise ValueError("Interaction cache prepared-row schema does not match this code")
         if self.metadata.get("schema_fingerprint") != _schema_fingerprint():
             raise ValueError("Interaction cache feature schema does not match this code")

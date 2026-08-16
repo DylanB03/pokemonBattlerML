@@ -11,43 +11,40 @@ now uses that checkpoint as a warm start, fits outcome-aware action and state
 values, and then optimizes Qwen directly through self-play PPO. Human-action
 agreement remains diagnostic; promotion is decided by complete-game results.
 
-## Improve the champion without replacing its policy
+## Train on a dataset large enough to change the experiment
 
-The recommended experiment now keeps the batch-005 champion as the complete
-base policy and learns only a bounded correction to its legal-action log
-probabilities:
+The recommended next run keeps the batch-005 Qwen policy and adds a structured
+sidecar trained on the official Metamon `pac-base` and `pac-exploratory`
+self-play corpora:
 
 ```bash
-python -m pokemon_battler.residual_pipeline \
-  --output-dir outputs/champion-residual-v1
+python -m pokemon_battler.large_offline_pipeline \
+  --output-dir outputs/metamon-large-v1
 ```
 
-The residual starts at zero, so before training its decisions are the champion's
-decisions. It distills 8,000 high-information Foul Play distributions, validates
-on 2,000 turns from entirely different battles, and regularizes against the
-already-built 317,102-row broad replay cache. Qwen and the interaction encoder
-are run only for the 10,000 selected teacher rows; neither is retrained. The
-candidate must improve held-out teacher metrics without excessive policy drift,
-then beat the champion in a 50-game pilot on three enemy teams absent from
-teacher training, then pass a 500-game-per-policy paired test over all nine
-teams. The
-final paired bootstrap interval must have a lower bound above zero; a merely
-positive observed delta is not enough to promote.
+The command downloads the two Gen 9 OU archives and the current general/high
+ladder team sets, prepares trajectory shards with four worker processes, builds
+the numeric interaction caches four at a time, trains with four data-loader
+workers, and evaluates four local games concurrently. Completed shards and
+caches are reused after an interruption. The default 5% deterministic sample is
+already much broader than the six-team teacher runs; use
+`--trajectory-sample-rate 1` only if there is enough disk for the full Gen 9
+portion of both archives.
 
-The source checkpoint is never overwritten. `selected_checkpoint.txt` points
-to the source champion from the moment the run starts and changes only if both
-battle gates pass. The pointer contains an absolute path. A failed or
-interrupted run leaves it on the champion. This
-does not promise a 51% ladder result; it is designed to stop spending full-run
-budgets on actors that have not demonstrated a game-level gain. See
-[Conservative champion residual](docs/champion-residual.md) for the evidence,
-objective, thresholds, artifacts, and smoke command.
+This does not run four copies of Qwen on one GPU. The sidecar learns from the
+same mechanics, roster, candidate, and four-event history tensors already used
+by the Qwen interaction head, while Qwen remains the base distribution at live
+inference. Their legal-action log probabilities are blended. That makes a
+million-row run practical without pretending the language model can be encoded
+millions of times cheaply. Every output is a new checkpoint, and the held-out
+battle gate leaves `selected_checkpoint.txt` on the old champion when the
+candidate loses.
 
-The prior recurrent IQL experiment remains reproducible with
-`pokemon_battler.trajectory_pipeline`, but its completed paired evaluation was
-negative and it is no longer the recommended path. Statewise PPO refuses both
-trajectory and residual checkpoints rather than silently deleting their active
-policy head.
+See [Large offline self-play pipeline](docs/large-offline-selfplay.md) for the
+data sources, action-parity check, resume behavior, throughput design, disk
+tradeoffs, artifact layout, and limitations. The recurrent IQL and conservative
+residual experiments remain reproducible, but both completed battle evaluations
+were negative and neither is the recommended next run.
 
 See [ROADMAP.md](ROADMAP.md) for the planned progression from behavior cloning
 to model-preference displays, replay review, counterfactual win-probability

@@ -33,6 +33,10 @@ from pokemon_battler.residual_modeling import (
     has_residual_head,
     load_residual_head,
 )
+from pokemon_battler.structured_modeling import (
+    has_structured_head,
+    load_structured_head,
+)
 from pokemon_battler.team_preview import (
     TeamPreviewCollator,
     has_team_preview_head,
@@ -109,6 +113,7 @@ class InteractionPolicyRuntime:
         local_files_only: bool | None = None,
         attn_implementation: str | None = None,
         action_value_weight: float | None = None,
+        structured_blend_weight: float | None = None,
         load_preview_head: bool = True,
     ) -> None:
         self.checkpoint = Path(checkpoint)
@@ -154,6 +159,19 @@ class InteractionPolicyRuntime:
         self.model.eval()
         self.head = load_interaction_head(self.model, self.checkpoint, self.device)
         self.head.eval()
+        self.structured_head = None
+        if has_structured_head(self.checkpoint):
+            self.structured_head = load_structured_head(self.checkpoint, self.device)
+        configured_structured_weight = float(
+            metadata.get("structured_policy_blend_weight", 0.0) or 0.0
+        )
+        self.structured_blend_weight = (
+            configured_structured_weight
+            if structured_blend_weight is None
+            else float(structured_blend_weight)
+        )
+        if self.structured_blend_weight < 0:
+            raise ValueError("structured_blend_weight cannot be negative")
         self.trajectory_head = None
         if has_trajectory_head(self.checkpoint):
             self.trajectory_head = load_trajectory_head(self.checkpoint, self.device)
@@ -241,6 +259,24 @@ class InteractionPolicyRuntime:
                 batch,
                 logits_parameter=self.logits_parameter,
             )
+            if self.structured_head is not None and self.structured_blend_weight:
+                structured_hidden = torch.zeros(
+                    (1, self.structured_head.qwen_hidden_size),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                structured_outputs = self.structured_head(structured_hidden, batch)
+                legal_mask = batch["legal_action_mask"]
+                combined_logits = outputs["action_log_probs"].float() + (
+                    self.structured_blend_weight
+                    * structured_outputs["action_log_probs"].float()
+                )
+                combined_logits = combined_logits.masked_fill(
+                    ~legal_mask, float("-inf")
+                )
+                outputs["action_log_probs"] = torch.log_softmax(
+                    combined_logits, dim=-1
+                )
         next_hidden: torch.Tensor | None = None
         if self.trajectory_head is not None:
             with torch.inference_mode():

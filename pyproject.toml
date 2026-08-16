@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "bitsandbytes>=0.46.1,<0.50",
+    "huggingface-hub>=0.27,<2",
     "lz4>=4.3.3",
     "numpy>=2.0.2",
     "peft>=0.14.0",
@@ -51,6 +52,11 @@ pokemon-trajectory-train = "pokemon_battler.trajectory_train:main"
 pokemon-trajectory-run = "pokemon_battler.trajectory_pipeline:main"
 pokemon-residual-cache = "pokemon_battler.residual_cache:main"
 pokemon-residual-run = "pokemon_battler.residual_pipeline:main"
+pokemon-metamon-assets = "pokemon_battler.metamon_assets:main"
+pokemon-parallel-trajectory-prepare = "pokemon_battler.parallel_trajectory_prepare:main"
+pokemon-parallel-interaction-cache = "pokemon_battler.parallel_interaction_cache:main"
+pokemon-structured-train = "pokemon_battler.structured_train:main"
+pokemon-large-offline-run = "pokemon_battler.large_offline_pipeline:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pokemon_battler"]

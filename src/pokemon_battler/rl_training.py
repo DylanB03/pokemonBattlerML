@@ -24,6 +24,7 @@ from pokemon_battler.reinforcement import (
     ppo_loss,
 )
 from pokemon_battler.residual_modeling import has_residual_head
+from pokemon_battler.structured_modeling import has_structured_head
 from pokemon_battler.train import _save_checkpoint, set_seed
 from pokemon_battler.training_data import (
     InteractionCollator,
@@ -118,6 +119,11 @@ def train_offline_outcomes(
     log_steps: int = 20,
 ) -> dict[str, Any]:
     """Fit outcome-aware Q, V, and policy heads from human replay results."""
+    if has_structured_head(checkpoint):
+        raise ValueError(
+            "The statewise offline updater cannot preserve a structured sidecar. "
+            "Use structured_train for this checkpoint."
+        )
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"Offline output directory is not empty: {output_dir}")
     if epochs <= 0 or batch_size <= 0 or gradient_accumulation_steps <= 0:
@@ -272,10 +278,14 @@ def train_ppo_rollouts(
     rollout_source: str = "local-self-play",
 ) -> dict[str, Any]:
     """Run clipped PPO updates from completed on-policy Showdown trajectories."""
-    if has_trajectory_head(checkpoint) or has_residual_head(checkpoint):
+    if (
+        has_trajectory_head(checkpoint)
+        or has_residual_head(checkpoint)
+        or has_structured_head(checkpoint)
+    ):
         raise ValueError(
             "The statewise PPO updater cannot preserve an auxiliary trajectory or "
-            "residual policy head. Run this checkpoint frozen or use its matching "
+            "residual/structured policy head. Run this checkpoint frozen or use its matching "
             "training objective."
         )
     if output_dir.exists() and any(output_dir.iterdir()):

@@ -758,3 +758,84 @@ candidate can become the source for the next set. It reports each 100-game
 record and the aggregate, but the highest set may belong to a different model.
 Given the results so far, I would run the frozen command first and would not
 treat “keep going until one set is positive” as evidence of improvement.
+
+## The next run has to change the data scale
+
+The postmortem left me with a practical question: what large offline dataset
+would actually change this project? “Collect more games” is not an answer when
+the collection is another small loop over the same teams.
+
+The two Foul Play DAgger rounds contain about 51,000 turn rows from 1,000
+battles. They are better labels than I first gave them credit for. Every legal
+action has a search value, and the second round lets Qwen act in more than half
+the visited states. The real weakness is that training used six opponent teams.
+The data can be soft, on-policy, and search-backed while still covering almost
+none of Gen 9 OU.
+
+Metamon now publishes the data that this experiment was missing. `pac-base`
+contains 11 million trajectories across its supported formats, and
+`pac-exploratory` adds seven million higher-temperature trajectories. Its May
+2026 team sets contain 139,000 Gen 9 general-ladder teams and 43,000 high-ladder
+teams. I do not need to generate that coverage a hundred public games at a
+time.
+
+Using it creates a new engineering problem. Running Qwen over millions of
+prepared turns would dominate the experiment before training began. Four Qwen
+processes would make that worse by duplicating the model in VRAM. I therefore
+split the final policy in a way that preserves the project constraint instead
+of pretending the cost does not exist.
+
+Qwen remains the accepted base policy. A second interaction head learns from
+the numeric and categorical battle tensors without a language-model forward
+pass. At deployment, both heads score the same 13 legal action slots and their
+log probabilities are blended. This is not a move back to a heuristic battle
+engine. Both distributions are learned, and Showdown still supplies rules
+rather than recommendations. It is also not the old no-Qwen ablation: setting
+the sidecar weight to zero recovers the exact Qwen policy.
+
+I kept both winning and losing trajectories. The action-value head learns WIN
+as one and LOSS as zero for the recorded action, the state value uses an
+expectile target, and advantage-weighted cloning decides how strongly the actor
+should copy it. That is more defensible than training on wins alone, which
+would erase useful defense and recovery decisions from games lost later. It
+also avoids treating every high-temperature exploratory action as an equally
+good hard target. It still cannot say which unplayed move would have won; only
+a search trace or simulator branch can supply that counterfactual.
+
+The data path had to change with the model. The old preparation loop decoded a
+20 GB archive sequentially and wrote one monolithic split. The new path keeps
+one bounded archive stream, sends inner decompression and state construction to
+four spawned workers, commits atomic JSONL shards, and records a manifest after
+each shard. Feature caches are built four shards at a time. Each JSONL shard has
+a binary byte-offset index, and actions, outcomes, and battle lengths are cached
+next to the mechanics arrays so later epochs do not parse the large JSON again.
+Restarting a run reuses every completed shard.
+
+I also added a parity gate before treating Metamon as compatible. Both projects
+say A0 through A3 are sorted moves, A4 through A8 are sorted switches, and A9
+through A12 are Tera versions of the move slots. The preparation report now
+counts every recorded action that cannot be recovered from that contract. It
+cannot silently turn an unmapped action into a plausible training target.
+
+The complete run is:
+
+```bash
+python -m pokemon_battler.large_offline_pipeline \
+  --output-dir outputs/metamon-large-v1
+```
+
+It defaults to a deterministic 5% Gen 9 sample because expanded trajectory JSON
+uses much more disk than the compressed archive. The full-data switch is
+`--trajectory-sample-rate 1`; it is a storage decision, not a different model.
+CPU preparation, cache generation, team parsing, and data loading use four
+workers. Local evaluation runs four battles concurrently. Training still uses
+one GPU and one model copy.
+
+This is the first proposed run after the failure analysis that changes the
+number and diversity of strategic states by orders of magnitude. It still may
+fail. Logged self-play actions are not counterfactual outcomes, the sidecar has
+only four explicit history events, and a stronger source policy can teach its
+own biases. A local Foul Play win is not a public ladder result. But another
+failure would now eliminate a real hypothesis: that the project was mostly
+starved for broad offline experience. That is more useful than watching a fifth
+loss curve settle at a slightly different number on the same data.
