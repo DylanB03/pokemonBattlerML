@@ -42,6 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-delta-interval-lower", type=float, default=-0.05)
     parser.add_argument("--candidate-action-value-weight", type=float)
     parser.add_argument("--champion-action-value-weight", type=float)
+    parser.add_argument("--candidate-structured-blend-weight", type=float)
+    parser.add_argument("--champion-structured-blend-weight", type=float)
     parser.add_argument(
         "--candidate-preview", action=argparse.BooleanOptionalAction, default=True
     )
@@ -100,6 +102,7 @@ def _arguments(
     port: int,
     *,
     action_value_weight: float | None = None,
+    structured_blend_weight: float | None = None,
     load_preview_head: bool = True,
     team_preview_policy: str = "learned",
 ) -> Namespace:
@@ -119,6 +122,7 @@ def _arguments(
         local_files_only=None,
         attn_implementation=None,
         action_value_weight=action_value_weight,
+        structured_blend_weight=structured_blend_weight,
         load_preview_head=load_preview_head,
         team_preview_policy=team_preview_policy,
         fail_fast=True,
@@ -132,6 +136,7 @@ def _run_policy(
     output_dir: Path,
     *,
     action_value_weight: float | None = None,
+    structured_blend_weight: float | None = None,
     load_preview_head: bool = True,
     team_preview_policy: str = "learned",
 ) -> dict[str, Any]:
@@ -172,6 +177,7 @@ def _run_policy(
                     args.games,
                     args.server_port,
                     action_value_weight=action_value_weight,
+                    structured_blend_weight=structured_blend_weight,
                     load_preview_head=load_preview_head,
                     team_preview_policy=team_preview_policy,
                 ),
@@ -202,6 +208,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     args.output_dir.mkdir(parents=True)
     candidate_action_value_weight = getattr(args, "candidate_action_value_weight", None)
     champion_action_value_weight = getattr(args, "champion_action_value_weight", None)
+    candidate_structured_blend_weight = getattr(
+        args, "candidate_structured_blend_weight", None
+    )
+    champion_structured_blend_weight = getattr(
+        args, "champion_structured_blend_weight", None
+    )
     candidate_preview = _checkpoint_preview_enabled(
         args.candidate, getattr(args, "candidate_preview", True)
     )
@@ -220,6 +232,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             schedule,
             args.output_dir / "candidate",
             action_value_weight=candidate_action_value_weight,
+            structured_blend_weight=candidate_structured_blend_weight,
             load_preview_head=candidate_preview,
             team_preview_policy="learned" if candidate_preview else "first",
         )
@@ -229,6 +242,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             schedule,
             args.output_dir / "champion",
             action_value_weight=champion_action_value_weight,
+            structured_blend_weight=champion_structured_blend_weight,
             load_preview_head=champion_preview,
             team_preview_policy="learned" if champion_preview else "first",
         )
@@ -266,10 +280,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "concurrent_games": min(args.concurrent_games, args.games),
         "candidate_inference": {
             "action_value_weight": candidate_action_value_weight,
+            "structured_blend_weight": candidate_structured_blend_weight,
             "preview": candidate_preview,
         },
         "champion_inference": {
             "action_value_weight": champion_action_value_weight,
+            "structured_blend_weight": champion_structured_blend_weight,
             "preview": champion_preview,
         },
         "promoted": promoted,

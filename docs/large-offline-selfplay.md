@@ -72,6 +72,51 @@ reported. The large pipeline permits at most 1%; the measured partial corpus
 was approximately 0.44%. This is still a compatibility gate, but it no longer
 rejects a corpus with more than 99% recoverable action parity.
 
+## Continue the promoted sidecar
+
+The completed v1 run retained 34,524 trajectories and 1,249,105 decisions. Its
+candidate won 48 of 100 paired held-out games; the unchanged source champion
+won 30 of 100 on the identical opponent-team schedule. The paired win-rate
+delta was `+0.18`, with a bootstrap interval of `[+0.07, +0.29]`.
+
+Continuation must load `structured_policy_head.safetensors`, not initialize a
+new sidecar from `interaction_head.safetensors`. It must also avoid replaying
+the same deterministic sample as though it were new data. The v2 command does
+both:
+
+```bash
+python -m pokemon_battler.large_offline_pipeline \
+  --output-dir outputs/metamon-large-v2 \
+  --checkpoint outputs/metamon-large-v1/04-candidate \
+  --trajectory-sample-rate 0.005 \
+  --trajectory-sample-offset 0.005 \
+  --rehearsal-run-dir outputs/metamon-large-v1 \
+  --rehearsal-ratio 0.25 \
+  --learning-rate 3e-5 \
+  --epochs 3 \
+  --blend-sweep-games 50 \
+  --blend-sweep-weight 0.25 \
+  --blend-sweep-weight 0.5 \
+  --blend-sweep-weight 0.75 \
+  --blend-sweep-weight 1.0 \
+  --games 200 \
+  --minimum-delta-interval-lower 0
+```
+
+With seed 42, v1 selected hash values in `[0, 0.005)` and v2 selects
+`[0.005, 0.010)`. These intervals are mutually exclusive by construction. The
+rehearsal ratio is a fraction of the combined training set: enough old cached
+rows are sampled for 25% old and 75% new examples. Validation uses only the new
+slice. Epoch zero is evaluated and participates in checkpoint selection, so
+the saved sidecar can roll back to the exact input weights.
+
+The initial `0.5` deployment blend was not tuned. V2 runs the four requested
+weights against one shared champion schedule built from validation-team
+compositions, writes the selected weight into the candidate checkpoint, and
+then evaluates candidate and champion on a separate test-team schedule. A
+strict `--minimum-delta-interval-lower 0` requires the paired interval's lower
+bound to be positive before promotion.
+
 ## Where four-way parallelism is useful
 
 The default `--workers 4` is used in four CPU-bound places:
@@ -103,7 +148,7 @@ The output is still a Qwen checkpoint. It contains:
 
 - the accepted batch-005 Qwen LoRA adapter;
 - the accepted interaction policy head;
-- the existing team-preview head;
+- the existing team-preview head when the source checkpoint provides one;
 - `structured_policy_head.safetensors`, trained on the large self-play sample.
 
 The sidecar uses the exact numeric and categorical tensors already supplied to
@@ -184,6 +229,10 @@ outputs/metamon-large-v1/
     structured_training_report.json
     training_config.json
     ...copied Qwen checkpoint files...
+  05-blend-sweep/
+    champion/
+    candidate-blend-*/
+    summary.json
   05-heldout-evaluation/
     candidate/
     champion/

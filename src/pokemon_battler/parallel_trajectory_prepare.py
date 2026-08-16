@@ -33,7 +33,7 @@ from pokemon_battler.trajectory_prepare import (
     trajectory_rows,
 )
 
-PARALLEL_PREPARE_SCHEMA = "parallel-trajectory-prepare-v1"
+PARALLEL_PREPARE_SCHEMA = "parallel-trajectory-prepare-v2"
 ACTION_CONTRACT = {
     "count": 13,
     "moves": [0, 1, 2, 3],
@@ -58,6 +58,7 @@ class WorkerSettings:
     min_rating: int | None
     outcome: str
     trajectory_sample_rate: float
+    trajectory_sample_offset: float
     reward_gamma: float
     require_outcome: bool
 
@@ -97,6 +98,7 @@ def _metadata_filter(
         metadata.battle_id,
         seed=settings.split_config.seed,
         sample_rate=settings.trajectory_sample_rate,
+        sample_offset=settings.trajectory_sample_offset,
     ):
         counters["trajectories_sampled_out"] += 1
     else:
@@ -217,6 +219,7 @@ def _prepare_one(
         metadata.battle_id,
         seed=settings.split_config.seed,
         sample_rate=settings.trajectory_sample_rate,
+        sample_offset=settings.trajectory_sample_offset,
     ):
         counters["trajectories_sampled_out"] += 1
         return PreparedResult(sequence, None, metadata.battle_id, b"", 0, dict(counters))
@@ -273,6 +276,7 @@ def _configuration(
         "min_rating": settings.min_rating,
         "outcome": settings.outcome,
         "trajectory_sample_rate": settings.trajectory_sample_rate,
+        "trajectory_sample_offset": settings.trajectory_sample_offset,
         "reward_gamma": settings.reward_gamma,
         "require_outcome": settings.require_outcome,
         "shard_trajectories": shard_trajectories,
@@ -407,6 +411,7 @@ def prepare_trajectory_dataset_parallel(
     min_rating: int | None = None,
     outcome: str = "both",
     trajectory_sample_rate: float = 1.0,
+    trajectory_sample_offset: float = 0.0,
     reward_gamma: float = DEFAULT_REWARD_GAMMA,
     workers: int = 4,
     shard_trajectories: int = 2_000,
@@ -420,6 +425,10 @@ def prepare_trajectory_dataset_parallel(
         raise ValueError("workers and shard_trajectories must be positive")
     if not 0 < trajectory_sample_rate <= 1:
         raise ValueError("trajectory_sample_rate must be in (0, 1]")
+    if trajectory_sample_offset < 0 or trajectory_sample_offset + trajectory_sample_rate > 1:
+        raise ValueError(
+            "trajectory_sample_offset must be non-negative and offset + rate at most one"
+        )
     if outcome not in {"both", "wins", "losses"}:
         raise ValueError("outcome must be both, wins, or losses")
     if maximum_unmapped_fraction is not None and not 0 <= maximum_unmapped_fraction <= 1:
@@ -432,6 +441,7 @@ def prepare_trajectory_dataset_parallel(
         min_rating=min_rating,
         outcome=outcome,
         trajectory_sample_rate=trajectory_sample_rate,
+        trajectory_sample_offset=trajectory_sample_offset,
         reward_gamma=reward_gamma,
         require_outcome=require_outcome,
     )
@@ -613,6 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-rating", type=int)
     parser.add_argument("--outcome", choices=("both", "wins", "losses"), default="both")
     parser.add_argument("--trajectory-sample-rate", type=float, default=1.0)
+    parser.add_argument("--trajectory-sample-offset", type=float, default=0.0)
     parser.add_argument("--reward-gamma", type=float, default=DEFAULT_REWARD_GAMMA)
     parser.add_argument("--split-mode", choices=("hash", "chronological"), default="hash")
     parser.add_argument("--seed", type=int, default=42)
@@ -647,6 +658,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         min_rating=args.min_rating,
         outcome=args.outcome,
         trajectory_sample_rate=args.trajectory_sample_rate,
+        trajectory_sample_offset=args.trajectory_sample_offset,
         reward_gamma=args.reward_gamma,
         workers=args.workers,
         shard_trajectories=args.shard_trajectories,

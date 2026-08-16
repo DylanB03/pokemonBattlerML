@@ -136,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--structured-blend-weight",
+        type=float,
+        help="Override the checkpoint's structured-sidecar log-probability weight.",
+    )
+    parser.add_argument(
         "--load-preview-head",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -193,6 +198,7 @@ async def _run_battles(
         local_files_only=args.local_files_only,
         attn_implementation=args.attn_implementation,
         action_value_weight=getattr(args, "action_value_weight", None),
+        structured_blend_weight=getattr(args, "structured_blend_weight", None),
         load_preview_head=getattr(args, "load_preview_head", True),
     )
     server_configuration = ServerConfiguration(
@@ -296,8 +302,11 @@ async def _run_battles(
                 if runtime.trajectory_head is not None
                 else "residual"
                 if runtime.residual_head is not None
+                else "structured-interaction"
+                if runtime.structured_head is not None and runtime.structured_blend_weight
                 else "interaction"
             ),
+            "structured_blend_weight": runtime.structured_blend_weight,
             "battle_format": args.battle_format,
             "opponent": args.opponent,
             "opponent_implementation": (

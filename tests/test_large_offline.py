@@ -15,6 +15,8 @@ from safetensors.torch import save_file as save_safetensors
 
 from pokemon_battler.interaction_modeling import InteractionPolicyHead
 from pokemon_battler.large_offline_pipeline import (
+    _blend_sweep_arguments,
+    _evaluation_arguments,
     _estimated_interaction_cache_bytes,
     build_parser,
 )
@@ -47,11 +49,44 @@ class LargeOfflineTests(unittest.TestCase):
         self.assertEqual(args.workers, 4)
         self.assertEqual(args.concurrent_games, 4)
         self.assertEqual(args.trajectory_sample_rate, 0.005)
+        self.assertEqual(args.trajectory_sample_offset, 0.0)
         self.assertEqual(args.maximum_prepared_gib, 32.0)
         self.assertEqual(args.maximum_cache_gib, 16.0)
         self.assertEqual(args.maximum_unmapped_fraction, 0.01)
         self.assertEqual(args.batch_size, 128)
         self.assertGreater(_estimated_interaction_cache_bytes(1), 9_000)
+
+    def test_pipeline_passes_selected_blend_only_to_the_candidate(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "outputs/test-large",
+                "--blend-sweep-games",
+                "50",
+                "--blend-sweep-weight",
+                "0.25",
+                "--blend-sweep-weight",
+                "0.75",
+                "--minimum-delta-interval-lower",
+                "0",
+            ]
+        )
+        teams = [Path("validation-a.txt"), Path("validation-b.txt")]
+        sweep = _blend_sweep_arguments(
+            args, Path("candidate"), teams, Path("blend-sweep")
+        )
+        self.assertEqual(sweep.blend_weights, [0.25, 0.75])
+        self.assertEqual(sweep.games, 50)
+        evaluation = _evaluation_arguments(
+            args,
+            Path("candidate"),
+            teams,
+            Path("heldout"),
+            candidate_structured_blend_weight=0.75,
+        )
+        self.assertEqual(evaluation.candidate_structured_blend_weight, 0.75)
+        self.assertIsNone(evaluation.champion_structured_blend_weight)
+        self.assertEqual(evaluation.minimum_delta_interval_lower, 0.0)
 
     def test_parallel_preparation_cache_and_resume_preserve_action_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -155,6 +190,29 @@ class LargeOfflineTests(unittest.TestCase):
             self.assertEqual(candidate_metadata["warmup_ratio"], 0.0)
             self.assertTrue(candidate_metadata["qwen_frozen"])
             self.assertEqual(candidate_metadata["qwen_learning_rate"], 0.0)
+            self.assertEqual(training["history"][0]["epoch"], 0)
+            self.assertIn(training["selected_epoch"], (0, 1))
+
+            with redirect_stdout(io.StringIO()):
+                continued = train_structured_policy(
+                    source_checkpoint=root / "candidate",
+                    prepared_dir=prepared,
+                    cache_dir=root / "cache",
+                    output_dir=root / "continued-candidate",
+                    rehearsal_prepared_dir=prepared,
+                    rehearsal_cache_dir=root / "cache",
+                    rehearsal_ratio=0.25,
+                    epochs=1,
+                    batch_size=16,
+                    eval_batch_size=16,
+                    learning_rate=3e-5,
+                    num_workers=0,
+                    device_name="cpu",
+                    log_steps=100,
+                )
+            self.assertTrue(continued["continued_from_structured_head"])
+            self.assertGreater(continued["rehearsal_examples"], 0)
+            self.assertAlmostEqual(continued["rehearsal_ratio"], 0.25, delta=0.08)
 
     def test_outer_lz4_tar_streams_without_writing_an_uncompressed_tar(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -256,6 +314,72 @@ class LargeOfflineTests(unittest.TestCase):
             self.assertEqual(counters["trajectories_sampled_out"], 1)
             self.assertNotIn("decode_errors", counters)
 
+    def test_trajectory_sampling_windows_are_strictly_disjoint(self) -> None:
+        first = {
+            index
+            for index in range(20_000)
+            if _trajectory_is_selected(
+                f"battle-{index}", seed=42, sample_rate=0.05, sample_offset=0.0
+            )
+        }
+        second = {
+            index
+            for index in range(20_000)
+            if _trajectory_is_selected(
+                f"battle-{index}", seed=42, sample_rate=0.05, sample_offset=0.05
+            )
+        }
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertFalse(first & second)
+        with self.assertRaises(ValueError):
+            _trajectory_is_selected(
+                "battle-invalid", seed=42, sample_rate=0.1, sample_offset=0.95
+            )
+
+    def test_parallel_preparation_applies_the_sampling_offset_after_decode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected = []
+            index = 0
+            while len(selected) < 12:
+                battle_id = f"battle-{index}"
+                if _trajectory_is_selected(
+                    battle_id, seed=42, sample_rate=0.05, sample_offset=0.05
+                ):
+                    selected.append(index)
+                index += 1
+            archive = root / "gen9ou.tar"
+            with tarfile.open(archive, "w") as stream:
+                for selected_index in selected:
+                    payload = json.dumps(
+                        {"states": [state(), terminal_state()], "actions": [0, -1]}
+                    ).encode()
+                    info = tarfile.TarInfo(
+                        "gen9ou/"
+                        f"battle-{selected_index}_1800_a_vs_b_01-02-2025_WIN.json"
+                    )
+                    info.size = len(payload)
+                    stream.addfile(info, io.BytesIO(payload))
+
+            with redirect_stdout(io.StringIO()):
+                report = prepare_trajectory_dataset_parallel(
+                    [archive],
+                    root / "prepared",
+                    split_config=SplitConfig(seed=42),
+                    trajectory_sample_rate=0.05,
+                    trajectory_sample_offset=0.05,
+                    workers=2,
+                    shard_trajectories=4,
+                    progress_every=0,
+                    require_outcome=True,
+                )
+
+            self.assertEqual(report["summary"]["source_items"], 12)
+            self.assertEqual(
+                sum(report["summary"]["transitions_per_split"].values()), 12
+            )
+
     def test_selfplay_download_keeps_the_outer_archive_compressed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -311,6 +435,9 @@ class LargeOfflineTests(unittest.TestCase):
             loaded = load_structured_head(output, torch.device("cpu"))
             self.assertEqual(loaded.qwen_mode, "none")
             self.assertEqual(loaded.d_model, 32)
+            continued = initialize_structured_head(output, metadata, torch.device("cpu"))
+            for name, value in loaded.state_dict().items():
+                self.assertTrue(torch.equal(value, continued.state_dict()[name]))
 
     def test_team_corpus_splits_by_composition_in_parallel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

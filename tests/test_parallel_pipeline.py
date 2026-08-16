@@ -6,11 +6,40 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
+from pokemon_battler.foul_play_worker import _fallback_decision
 from pokemon_battler.parallel_teacher_collect import _merge_traces, _worker_command
 from pokemon_battler.policy_suite import _checkpoint_preview_enabled, _indexed_results
+from pokemon_battler.structured_blend_sweep import _normalized_weights, _weight_slug
+from pokemon_battler.structured_modeling import set_structured_blend_weight
 
 
 class ParallelPipelineTests(unittest.TestCase):
+    def test_foul_play_search_failure_uses_a_legal_request_fallback(self) -> None:
+        request = {
+            "active": [
+                {
+                    "moves": [
+                        {"id": "recover", "pp": 0, "disabled": False},
+                        {"id": "thunderbolt", "pp": 12, "disabled": False},
+                    ]
+                }
+            ],
+            "side": {
+                "pokemon": [
+                    {"active": True, "condition": "100/100"},
+                    {"active": False, "condition": "100/100"},
+                ]
+            },
+        }
+        self.assertEqual(
+            _fallback_decision(request, 7), ["/choose move thunderbolt", "7"]
+        )
+        request["forceSwitch"] = [True]
+        self.assertEqual(_fallback_decision(request, 8), ["/switch 2", "8"])
+        self.assertEqual(
+            _fallback_decision({}, 9, team_preview=True), ["/switch 1", "9"]
+        )
+
     def test_teacher_workers_get_unique_ports_users_and_shared_advisor(self) -> None:
         args = Namespace(
             team_file=Path("fixed.txt"),
@@ -97,6 +126,23 @@ class ParallelPipelineTests(unittest.TestCase):
             (checkpoint / "team_preview_head.safetensors").touch()
             self.assertTrue(_checkpoint_preview_enabled(checkpoint, True))
             self.assertFalse(_checkpoint_preview_enabled(checkpoint, False))
+
+    def test_structured_blend_sweep_normalizes_and_persists_selection(self) -> None:
+        self.assertEqual(_normalized_weights([1.0, 0.5, 0.5]), [0.5, 1.0])
+        self.assertEqual(_weight_slug(0.25), "0p25")
+        with self.assertRaises(ValueError):
+            _normalized_weights([-0.1])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkpoint = Path(temporary_directory)
+            (checkpoint / "training_config.json").write_text(
+                json.dumps({"structured_policy_blend_weight": 0.5}), encoding="utf-8"
+            )
+            set_structured_blend_weight(checkpoint, 0.75)
+            metadata = json.loads(
+                (checkpoint / "training_config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["structured_policy_blend_weight"], 0.75)
+            self.assertEqual(metadata["selected_structured_blend_weight"], 0.75)
 
 
 if __name__ == "__main__":

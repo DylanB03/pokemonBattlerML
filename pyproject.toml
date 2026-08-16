@@ -56,6 +56,7 @@ pokemon-metamon-assets = "pokemon_battler.metamon_assets:main"
 pokemon-parallel-trajectory-prepare = "pokemon_battler.parallel_trajectory_prepare:main"
 pokemon-parallel-interaction-cache = "pokemon_battler.parallel_interaction_cache:main"
 pokemon-structured-train = "pokemon_battler.structured_train:main"
+pokemon-structured-blend-sweep = "pokemon_battler.structured_blend_sweep:main"
 pokemon-large-offline-run = "pokemon_battler.large_offline_pipeline:main"
 
 [tool.hatch.build.targets.wheel]

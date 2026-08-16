@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _fallback_decision(request: dict, rqid: int, *, team_preview: bool = False) -> list[str]:
+    """Return a legal deterministic order if Foul Play's search engine panics."""
+    if team_preview:
+        return ["/switch 1", str(rqid)]
+    force_switch = bool((request.get("forceSwitch") or [False])[0])
+    if not force_switch:
+        active = request.get("active") or []
+        moves = (active[0].get("moves") or []) if active else []
+        for move in moves:
+            if not move.get("disabled") and int(move.get("pp", 1) or 0) > 0:
+                move_id = str(move.get("id") or move.get("move") or "").strip()
+                if move_id:
+                    return [f"/choose move {move_id}", str(rqid)]
+    for index, pokemon in enumerate((request.get("side") or {}).get("pokemon") or [], 1):
+        condition = str(pokemon.get("condition") or "")
+        if not pokemon.get("active") and not condition.endswith(" fnt") and condition != "0 fnt":
+            return [f"/switch {index}", str(rqid)]
+    raise RuntimeError("Foul Play search failed and its request had no legal fallback")
+
+
 def main() -> None:
     known, remaining = build_parser().parse_known_args()
     checkout = known.checkout.resolve()
@@ -26,7 +47,9 @@ def main() -> None:
     sys.path.insert(0, str(checkout))
     sys.argv = [sys.argv[0], *remaining]
 
+    from fp import run_battle as foul_play_battle
     from fp.main import run_foul_play
+    from fp.modes import base as foul_play_base
     from fp.websocket_client import PSWebsocketClient
 
     if known.teacher_trace is not None:
@@ -38,6 +61,24 @@ def main() -> None:
             student_action_probability=known.student_action_probability,
             seed=known.dagger_seed,
         )
+
+    original_pick_move = foul_play_battle.async_pick_move
+
+    async def safe_pick_move(battle):
+        try:
+            return await original_pick_move(battle)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Foul Play search failed; submitting a deterministic legal fallback"
+            )
+            return _fallback_decision(
+                battle.request_json,
+                battle.rqid,
+                team_preview=bool(battle.team_preview),
+            )
+
+    foul_play_base.async_pick_move = safe_pick_move
+    foul_play_battle.async_pick_move = safe_pick_move
 
     async def local_no_security_login(client: PSWebsocketClient) -> str:
         await client.get_id_and_challstr()

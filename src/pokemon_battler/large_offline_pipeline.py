@@ -28,6 +28,8 @@ from pokemon_battler.parallel_trajectory_prepare import (
 )
 from pokemon_battler.policy_suite import run as run_policy_suite
 from pokemon_battler.prepare import SplitConfig
+from pokemon_battler.structured_blend_sweep import run as run_structured_blend_sweep
+from pokemon_battler.structured_modeling import set_structured_blend_weight
 from pokemon_battler.structured_train import train_structured_policy
 from pokemon_battler.team_manifest import build_team_manifests
 
@@ -77,6 +79,8 @@ def _evaluation_arguments(
     candidate: Path,
     enemy_teams: Sequence[Path],
     output_dir: Path,
+    *,
+    candidate_structured_blend_weight: float | None = None,
 ) -> Namespace:
     return Namespace(
         candidate=candidate,
@@ -95,11 +99,41 @@ def _evaluation_arguments(
         foul_play_search_threads=1,
         concurrent_games=args.concurrent_games,
         promotion_margin=0.0,
-        minimum_delta_interval_lower=-0.05,
+        minimum_delta_interval_lower=args.minimum_delta_interval_lower,
         candidate_action_value_weight=None,
         champion_action_value_weight=None,
+        candidate_structured_blend_weight=candidate_structured_blend_weight,
+        champion_structured_blend_weight=None,
         candidate_preview=True,
         champion_preview=True,
+        no_bootstrap_server=False,
+        no_bootstrap_opponents=False,
+    )
+
+
+def _blend_sweep_arguments(
+    args: argparse.Namespace,
+    candidate: Path,
+    enemy_teams: Sequence[Path],
+    output_dir: Path,
+) -> Namespace:
+    return Namespace(
+        candidate=candidate,
+        champion=args.checkpoint,
+        team_file=args.team_file,
+        enemy_team_file=list(enemy_teams),
+        enemy_team_dir=None,
+        blend_weights=args.blend_sweep_weights,
+        games=args.blend_sweep_games,
+        seed=args.seed + 5_000,
+        output_dir=output_dir,
+        showdown_dir=args.showdown_dir,
+        opponents_dir=args.opponents_dir,
+        server_port=args.server_port,
+        foul_play_search_time_ms=args.search_time_ms,
+        foul_play_parallelism=1,
+        foul_play_search_threads=1,
+        concurrent_games=args.concurrent_games,
         no_bootstrap_server=False,
         no_bootstrap_opponents=False,
     )
@@ -110,6 +144,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("workers and concurrent-games must be positive")
     if args.maximum_prepared_gib <= 0 or args.maximum_cache_gib <= 0:
         raise ValueError("storage limits must be positive")
+    if args.rehearsal_ratio and args.rehearsal_run_dir is None:
+        raise ValueError("--rehearsal-ratio requires --rehearsal-run-dir")
+    if not 0 <= args.rehearsal_ratio < 1:
+        raise ValueError("--rehearsal-ratio must be in [0, 1)")
+    if args.blend_sweep_games < 0:
+        raise ValueError("--blend-sweep-games cannot be negative")
     if not args.checkpoint.is_dir() or not args.team_file.is_file():
         raise FileNotFoundError("The source checkpoint or fixed player team is missing")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -122,12 +162,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     else:
         disk = shutil.disk_usage(args.output_dir)
         manifest = {
-            "schema": "large-offline-qwen-sidecar-pipeline-v1",
+            "schema": "large-offline-qwen-sidecar-pipeline-v2",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "running",
             "source_checkpoint": str(args.checkpoint),
             "workers": args.workers,
             "concurrent_games": args.concurrent_games,
+            "trajectory_sample_window": [
+                args.trajectory_sample_offset,
+                args.trajectory_sample_offset + args.trajectory_sample_rate,
+            ],
+            "rehearsal_run_dir": (
+                str(args.rehearsal_run_dir) if args.rehearsal_run_dir else None
+            ),
+            "rehearsal_ratio": args.rehearsal_ratio,
             "free_disk_gib_at_start": round(disk.free / 1024**3, 1),
             "phases": {},
         }
@@ -169,6 +217,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             min_rating=None,
             outcome="both",
             trajectory_sample_rate=args.trajectory_sample_rate,
+            trajectory_sample_offset=args.trajectory_sample_offset,
             reward_gamma=0.99,
             workers=args.workers,
             shard_trajectories=args.shard_trajectories,
@@ -188,6 +237,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "prepared_limit_gib": args.maximum_prepared_gib,
             "cache_limit_gib": args.maximum_cache_gib,
             "prepared_rows": prepared_rows,
+            "trajectory_sample_offset": args.trajectory_sample_offset,
+            "trajectory_sample_rate": args.trajectory_sample_rate,
             "estimated_cache_gib": round(estimated_cache_bytes / 1024**3, 2),
         }
         _write_manifest(run_manifest_path, manifest)
@@ -234,6 +285,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if training_report_path.is_file():
             training = json.loads(training_report_path.read_text(encoding="utf-8"))
         else:
+            rehearsal_prepared_dir = (
+                args.rehearsal_run_dir / "01-prepared"
+                if args.rehearsal_run_dir is not None
+                else None
+            )
+            rehearsal_cache_dir = (
+                args.rehearsal_run_dir / "02-interaction-cache"
+                if args.rehearsal_run_dir is not None
+                else None
+            )
             training = train_structured_policy(
                 source_checkpoint=args.checkpoint,
                 prepared_dir=prepared_dir,
@@ -252,6 +313,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 q_weight=args.q_weight,
                 value_weight=args.value_weight,
                 blend_weight=args.blend_weight,
+                rehearsal_prepared_dir=rehearsal_prepared_dir,
+                rehearsal_cache_dir=rehearsal_cache_dir,
+                rehearsal_ratio=args.rehearsal_ratio,
                 num_workers=args.workers,
                 device_name=args.device_name,
                 seed=args.seed,
@@ -261,7 +325,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _write_manifest(run_manifest_path, manifest)
 
         selected = candidate_dir
+        selected_blend_weight = float(training["blend_weight"])
         if not args.skip_battle_evaluation:
+            if args.blend_sweep_games:
+                blend_sweep_dir = args.output_dir / "05-blend-sweep"
+                blend_summary_path = blend_sweep_dir / "summary.json"
+                if blend_summary_path.is_file():
+                    blend_sweep = json.loads(
+                        blend_summary_path.read_text(encoding="utf-8")
+                    )
+                else:
+                    validation_manifest = Path(team_report["manifests"]["validation"])
+                    validation_teams = [
+                        Path(line)
+                        for line in validation_manifest.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    blend_sweep = run_structured_blend_sweep(
+                        _blend_sweep_arguments(
+                            args, candidate_dir, validation_teams, blend_sweep_dir
+                        )
+                    )
+                selected_blend_weight = float(
+                    blend_sweep["best_configuration"]["structured_blend_weight"]
+                )
+                set_structured_blend_weight(candidate_dir, selected_blend_weight)
+                manifest["phases"]["blend_sweep"] = blend_sweep
+                _write_manifest(run_manifest_path, manifest)
             evaluation_dir = args.output_dir / "05-heldout-evaluation"
             summary_path = evaluation_dir / "summary.json"
             if summary_path.is_file():
@@ -274,7 +364,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     if line.strip()
                 ]
                 evaluation = run_policy_suite(
-                    _evaluation_arguments(args, candidate_dir, enemy_teams, evaluation_dir)
+                    _evaluation_arguments(
+                        args,
+                        candidate_dir,
+                        enemy_teams,
+                        evaluation_dir,
+                        candidate_structured_blend_weight=selected_blend_weight,
+                    )
                 )
             manifest["phases"]["heldout_evaluation"] = evaluation
             if not evaluation["promoted"]:
@@ -334,6 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Retain downloaded self-play archives after a successful pipeline run.",
     )
     parser.add_argument("--trajectory-sample-rate", type=float, default=0.005)
+    parser.add_argument("--trajectory-sample-offset", type=float, default=0.0)
     parser.add_argument("--maximum-prepared-gib", type=float, default=32.0)
     parser.add_argument("--maximum-cache-gib", type=float, default=16.0)
     parser.add_argument("--maximum-unmapped-fraction", type=float, default=0.01)
@@ -356,11 +453,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q-weight", type=float, default=1.0)
     parser.add_argument("--value-weight", type=float, default=1.0)
     parser.add_argument("--blend-weight", type=float, default=0.5)
+    parser.add_argument("--rehearsal-run-dir", type=Path)
+    parser.add_argument("--rehearsal-ratio", type=float, default=0.0)
     parser.add_argument(
         "--device", dest="device_name", choices=("auto", "cpu", "cuda"), default="auto"
     )
     parser.add_argument("--log-steps", type=int, default=100)
     parser.add_argument("--games", type=int, default=100)
+    parser.add_argument("--blend-sweep-games", type=int, default=0)
+    parser.add_argument(
+        "--blend-sweep-weight", dest="blend_sweep_weights", action="append", type=float
+    )
+    parser.add_argument("--minimum-delta-interval-lower", type=float, default=-0.05)
     parser.add_argument("--concurrent-games", type=int, default=4)
     parser.add_argument("--search-time-ms", type=int, default=250)
     parser.add_argument("--seed", type=int, default=42)

@@ -54,14 +54,19 @@ def _trajectory_is_selected(
     *,
     seed: int,
     sample_rate: float,
+    sample_offset: float = 0.0,
 ) -> bool:
-    if sample_rate >= 1:
+    if not 0 < sample_rate <= 1:
+        raise ValueError("sample_rate must be in (0, 1]")
+    if sample_offset < 0 or sample_offset + sample_rate > 1:
+        raise ValueError("sample_offset must be non-negative and offset + rate at most one")
+    if sample_rate >= 1 and sample_offset == 0:
         return True
     digest = hashlib.sha256(
         f"trajectory-sample:{seed}:{battle_id}".encode("utf-8")
     ).digest()
     unit_interval = int.from_bytes(digest[:8], "big") / float(2**64)
-    return unit_interval < sample_rate
+    return sample_offset <= unit_interval < sample_offset + sample_rate
 
 
 def _status_inflicted(
@@ -281,6 +286,7 @@ def prepare_trajectory_dataset(
     min_rating: int | None = None,
     outcome: str = "both",
     trajectory_sample_rate: float = 1.0,
+    trajectory_sample_offset: float = 0.0,
     max_trajectories_per_split: int | None = None,
     reward_gamma: float = DEFAULT_REWARD_GAMMA,
     progress_every: int = 10_000,
@@ -288,6 +294,10 @@ def prepare_trajectory_dataset(
 ) -> dict[str, Any]:
     if not 0 < trajectory_sample_rate <= 1:
         raise ValueError("trajectory_sample_rate must be in (0, 1]")
+    if trajectory_sample_offset < 0 or trajectory_sample_offset + trajectory_sample_rate > 1:
+        raise ValueError(
+            "trajectory_sample_offset must be non-negative and offset + rate at most one"
+        )
     if not 0 < reward_gamma <= 1:
         raise ValueError("reward_gamma must be in (0, 1]")
     if outcome not in {"both", "wins", "losses"}:
@@ -338,6 +348,7 @@ def prepare_trajectory_dataset(
                 metadata.battle_id,
                 seed=split_config.seed,
                 sample_rate=trajectory_sample_rate,
+                sample_offset=trajectory_sample_offset,
             ):
                 counters["trajectories_sampled_out"] += 1
                 continue
@@ -392,6 +403,7 @@ def prepare_trajectory_dataset(
         "min_rating": min_rating,
         "outcome": outcome,
         "trajectory_sample_rate": trajectory_sample_rate,
+        "trajectory_sample_offset": trajectory_sample_offset,
         "max_trajectories_per_split": max_trajectories_per_split,
         "reward_gamma": reward_gamma,
         "split_config": {
@@ -435,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-rating", type=int)
     parser.add_argument("--outcome", choices=("both", "wins", "losses"), default="both")
     parser.add_argument("--trajectory-sample-rate", type=float, default=1.0)
+    parser.add_argument("--trajectory-sample-offset", type=float, default=0.0)
     parser.add_argument("--max-trajectories-per-split", type=int)
     parser.add_argument("--reward-gamma", type=float, default=DEFAULT_REWARD_GAMMA)
     parser.add_argument("--split-mode", choices=("hash", "chronological"), default="hash")
@@ -465,6 +478,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         min_rating=args.min_rating,
         outcome=args.outcome,
         trajectory_sample_rate=args.trajectory_sample_rate,
+        trajectory_sample_offset=args.trajectory_sample_offset,
         max_trajectories_per_split=args.max_trajectories_per_split,
         reward_gamma=args.reward_gamma,
         progress_every=args.progress_every,

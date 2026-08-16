@@ -11,20 +11,43 @@ now uses that checkpoint as a warm start, fits outcome-aware action and state
 values, and then optimizes Qwen directly through self-play PPO. Human-action
 agreement remains diagnostic; promotion is decided by complete-game results.
 
-## Train on a dataset large enough to change the experiment
+## Continue the promoted large-data policy
 
-The recommended next run keeps the batch-005 Qwen policy and adds a structured
-sidecar trained on the official Metamon `pac-base` and `pac-exploratory`
-self-play corpora:
+The first 0.5% Metamon sidecar beat the previous champion 48% to 30% on a
+paired 100-game Foul Play schedule. The Qwen adapter and original interaction
+head were byte-identical; the trained structured sidecar was the only policy
+addition. The recommended next run continues that sidecar on the adjacent,
+strictly disjoint 0.5% hash window, rehearses old cached decisions, selects a
+blend on validation teams, and gates the result against the promoted v1:
 
 ```bash
 python -m pokemon_battler.large_offline_pipeline \
-  --output-dir outputs/metamon-large-v1
+  --output-dir outputs/metamon-large-v2 \
+  --checkpoint outputs/metamon-large-v1/04-candidate \
+  --trajectory-sample-rate 0.005 \
+  --trajectory-sample-offset 0.005 \
+  --rehearsal-run-dir outputs/metamon-large-v1 \
+  --rehearsal-ratio 0.25 \
+  --learning-rate 3e-5 \
+  --epochs 3 \
+  --blend-sweep-games 50 \
+  --blend-sweep-weight 0.25 \
+  --blend-sweep-weight 0.5 \
+  --blend-sweep-weight 0.75 \
+  --blend-sweep-weight 1.0 \
+  --games 200 \
+  --minimum-delta-interval-lower 0
 ```
 
-The command downloads the two Gen 9 OU archives and the current general/high
-ladder team sets, streams the compressed self-play archives without writing
-expanded TAR copies, prepares trajectory shards with four worker processes,
+The command downloads the two Gen 9 OU archives and reuses the current
+v1 prepared/cache directories for rehearsal. It evaluates epoch zero before
+updates, so a continuation whose validation objective only degrades saves the
+unchanged starting sidecar. The blend sweep uses validation-team compositions;
+the final 200-game-per-policy test uses the separate test-team manifest.
+
+The pipeline streams the compressed self-play archives without writing
+expanded TAR copies, loads the current general/high-ladder team sets, and
+prepares trajectory shards with four worker processes. It then
 builds the numeric interaction caches four at a time, trains with four
 data-loader workers, and evaluates four local games concurrently. Sampled-out
 members bypass inner JSON decoding. Completed shards and caches are reused after
@@ -42,7 +65,8 @@ inference. Their legal-action log probabilities are blended. That makes a
 million-row run practical without pretending the language model can be encoded
 millions of times cheaply. Every output is a new checkpoint, and the held-out
 battle gate leaves `selected_checkpoint.txt` on the old champion when the
-candidate loses.
+candidate loses. The original v1 command and result remain documented in
+[Large offline self-play pipeline](docs/large-offline-selfplay.md).
 
 See [Large offline self-play pipeline](docs/large-offline-selfplay.md) for the
 data sources, action-parity check, resume behavior, throughput design, disk

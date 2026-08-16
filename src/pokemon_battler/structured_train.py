@@ -4,7 +4,7 @@ import argparse
 import bisect
 import copy
 import json
-import math
+import random
 import shutil
 import time
 from collections.abc import Sequence
@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 
 from pokemon_battler.interaction_cache import (
     ARRAY_SPECS,
@@ -267,6 +267,9 @@ def train_structured_policy(
     q_weight: float = 1.0,
     value_weight: float = 1.0,
     blend_weight: float = 0.5,
+    rehearsal_prepared_dir: Path | None = None,
+    rehearsal_cache_dir: Path | None = None,
+    rehearsal_ratio: float = 0.0,
     num_workers: int = 4,
     device_name: str = "auto",
     seed: int = 42,
@@ -283,8 +286,16 @@ def train_structured_policy(
         or q_weight < 0
         or value_weight < 0
         or blend_weight < 0
+        or not 0 <= rehearsal_ratio < 1
     ):
-        raise ValueError("Learning rate must be positive and loss/blend weights non-negative")
+        raise ValueError(
+            "Learning rate must be positive, loss/blend weights non-negative, and "
+            "rehearsal-ratio in [0, 1)"
+        )
+    if (rehearsal_prepared_dir is None) != (rehearsal_cache_dir is None):
+        raise ValueError("Rehearsal prepared and cache directories must be provided together")
+    if rehearsal_ratio and rehearsal_prepared_dir is None:
+        raise ValueError("A positive rehearsal ratio requires rehearsal data")
     if not 0.5 < expectile < 1 or advantage_temperature <= 0:
         raise ValueError("expectile must be in (0.5, 1) and advantage temperature positive")
     if maximum_advantage_weight < 1:
@@ -299,8 +310,29 @@ def train_structured_policy(
     if resolved_device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     device = torch.device(resolved_device)
+    continued_from_structured_head = (
+        source_checkpoint / "structured_policy_head.safetensors"
+    ).is_file()
     head = initialize_structured_head(source_checkpoint, metadata, device)
-    train_dataset = ShardedInteractionDataset(prepared_dir, cache_dir, "train")
+    new_train_dataset = ShardedInteractionDataset(prepared_dir, cache_dir, "train")
+    rehearsal_examples = 0
+    train_dataset: Dataset[dict[str, Any]] = new_train_dataset
+    if rehearsal_ratio:
+        assert rehearsal_prepared_dir is not None
+        assert rehearsal_cache_dir is not None
+        rehearsal_dataset = ShardedInteractionDataset(
+            rehearsal_prepared_dir, rehearsal_cache_dir, "train"
+        )
+        requested_rehearsal = round(
+            len(new_train_dataset) * rehearsal_ratio / (1.0 - rehearsal_ratio)
+        )
+        rehearsal_examples = min(requested_rehearsal, len(rehearsal_dataset))
+        rehearsal_indices = random.Random(seed + 1_000_003).sample(
+            range(len(rehearsal_dataset)), rehearsal_examples
+        )
+        train_dataset = ConcatDataset(
+            [new_train_dataset, Subset(rehearsal_dataset, rehearsal_indices)]
+        )
     validation_dataset = ShardedInteractionDataset(prepared_dir, cache_dir, "validation")
     collator = StructuredPolicyCollator()
     loader_kwargs: dict[str, Any] = {
@@ -334,13 +366,28 @@ def train_structured_policy(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(len(train_loader) * epochs, 1)
     )
-    best_state: dict[str, torch.Tensor] | None = None
-    best_accuracy = -math.inf
-    best_loss = math.inf
-    history: list[dict[str, Any]] = []
+    started = time.monotonic()
+    initial_validation = _evaluate(
+        head,
+        validation_loader,
+        device,
+        family_weight=family_weight,
+        expectile=expectile,
+        advantage_temperature=advantage_temperature,
+        maximum_advantage_weight=maximum_advantage_weight,
+        behavior_clone_weight=behavior_clone_weight,
+        q_weight=q_weight,
+        value_weight=value_weight,
+    )
+    initial_record = {"epoch": 0, **initial_validation}
+    print(json.dumps({"phase": "structured-policy-validation", **initial_record}), flush=True)
+    best_state: dict[str, torch.Tensor] | None = copy.deepcopy(head.state_dict())
+    best_accuracy = initial_validation["action_accuracy"]
+    best_loss = initial_validation["loss"]
+    best_epoch = 0
+    history: list[dict[str, Any]] = [initial_record]
     updates = 0
     examples = 0
-    started = time.monotonic()
     for epoch in range(epochs):
         head.train()
         running: dict[str, float] = {}
@@ -409,6 +456,7 @@ def train_structured_policy(
         ):
             best_accuracy = validation["action_accuracy"]
             best_loss = validation["loss"]
+            best_epoch = epoch + 1
             best_state = copy.deepcopy(head.state_dict())
     if best_state is None:
         raise RuntimeError("Structured training completed without validation")
@@ -416,11 +464,21 @@ def train_structured_policy(
     _copy_source_checkpoint(source_checkpoint, output_dir)
     save_structured_head(head, output_dir)
     report = {
-        "schema": "structured-policy-training-v1",
+        "schema": "structured-policy-training-v2",
         "source_checkpoint": str(source_checkpoint),
         "prepared_dir": str(prepared_dir),
         "cache_dir": str(cache_dir),
         "train_examples": len(train_dataset),
+        "new_train_examples": len(new_train_dataset),
+        "rehearsal_examples": rehearsal_examples,
+        "rehearsal_ratio": rehearsal_examples / max(len(train_dataset), 1),
+        "rehearsal_prepared_dir": (
+            str(rehearsal_prepared_dir) if rehearsal_prepared_dir is not None else None
+        ),
+        "rehearsal_cache_dir": (
+            str(rehearsal_cache_dir) if rehearsal_cache_dir is not None else None
+        ),
+        "continued_from_structured_head": continued_from_structured_head,
         "validation_examples": len(validation_dataset),
         "epochs": epochs,
         "updates": updates,
@@ -435,6 +493,7 @@ def train_structured_policy(
         "qwen_learning_rate": 0.0,
         "best_validation_accuracy": best_accuracy,
         "best_validation_loss": best_loss,
+        "selected_epoch": best_epoch,
         "blend_weight": blend_weight,
         "expectile": expectile,
         "advantage_temperature": advantage_temperature,
@@ -487,6 +546,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q-weight", type=float, default=1.0)
     parser.add_argument("--value-weight", type=float, default=1.0)
     parser.add_argument("--blend-weight", type=float, default=0.5)
+    parser.add_argument("--rehearsal-prepared-dir", type=Path)
+    parser.add_argument("--rehearsal-cache-dir", type=Path)
+    parser.add_argument("--rehearsal-ratio", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument(
         "--device", dest="device_name", choices=("auto", "cpu", "cuda"), default="auto"
@@ -516,6 +578,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         q_weight=args.q_weight,
         value_weight=args.value_weight,
         blend_weight=args.blend_weight,
+        rehearsal_prepared_dir=args.rehearsal_prepared_dir,
+        rehearsal_cache_dir=args.rehearsal_cache_dir,
+        rehearsal_ratio=args.rehearsal_ratio,
         num_workers=args.num_workers,
         device_name=args.device_name,
         seed=args.seed,

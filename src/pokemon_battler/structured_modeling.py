@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,20 @@ STRUCTURED_POLICY_SCHEMA = "qwen-structured-sidecar-v1"
 
 def has_structured_head(checkpoint: str | Path | None) -> bool:
     return bool(checkpoint) and (Path(checkpoint) / STRUCTURED_HEAD_FILENAME).is_file()
+
+
+def set_structured_blend_weight(checkpoint: str | Path, weight: float) -> None:
+    if weight < 0:
+        raise ValueError("Structured blend weight must be non-negative")
+    path = Path(checkpoint) / "training_config.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    metadata["structured_policy_blend_weight"] = float(weight)
+    metadata["selected_structured_blend_weight"] = float(weight)
+    partial = path.with_suffix(path.suffix + ".partial")
+    partial.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(partial, path)
 
 
 def _head_from_metadata(metadata: dict[str, Any], qwen_hidden_size: int) -> InteractionPolicyHead:
@@ -36,6 +51,8 @@ def initialize_structured_head(
     metadata: dict[str, Any],
     device: torch.device,
 ) -> InteractionPolicyHead:
+    if has_structured_head(source_checkpoint):
+        return load_structured_head(source_checkpoint, device)
     source = Path(source_checkpoint) / "interaction_head.safetensors"
     if not source.is_file():
         raise FileNotFoundError(source)
