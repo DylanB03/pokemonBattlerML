@@ -828,8 +828,11 @@ python -m pokemon_battler.large_offline_pipeline \
   --output-dir outputs/metamon-large-v1
 ```
 
-It defaults to a deterministic 5% Gen 9 sample because expanded trajectory JSON
-uses much more disk than the compressed archive. The full-data switch is
+It originally defaulted to 5%, but an exact scan found 6,961,526 Gen 9 OU
+trajectories and the first quarter of preparation already occupied 61 GiB. I
+reduced the default to a deterministic 0.5%, projected to retain about 34,800
+trajectories and 1.27 million decisions. Preparation now has a 32 GiB hard limit
+and cache construction has a 16 GiB estimate gate. The full-data switch is
 `--trajectory-sample-rate 1`; it is a storage decision, not a different model.
 CPU preparation, cache generation, team parsing, and data loading use four
 workers. Local evaluation runs four battles concurrently. Training still uses

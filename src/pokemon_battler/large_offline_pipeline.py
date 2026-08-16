@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from pokemon_battler.gated_pipeline import DEFAULT_CHAMPION
+from pokemon_battler.interaction_cache import ARRAY_SPECS
 from pokemon_battler.live_eval import DEFAULT_TEAM
 from pokemon_battler.metamon_assets import (
     DEFAULT_SELFPLAY_SUBSETS,
@@ -51,6 +54,15 @@ def _remove_streamed_selfplay_archives(paths: Sequence[str]) -> dict[str, Any]:
         "removed": removed,
         "removed_gib": round(removed_bytes / 1024**3, 2),
     }
+
+
+def _estimated_interaction_cache_bytes(rows: int) -> int:
+    feature_bytes = sum(
+        np.dtype(dtype).itemsize * int(np.prod(tail))
+        for dtype, tail in ARRAY_SPECS.values()
+    )
+    target_bytes = np.dtype(np.int8).itemsize * 2 + np.dtype(np.int16).itemsize
+    return rows * (feature_bytes + target_bytes)
 
 
 def _load_complete(path: Path) -> dict[str, Any] | None:
@@ -96,6 +108,8 @@ def _evaluation_arguments(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.workers <= 0 or args.concurrent_games <= 0:
         raise ValueError("workers and concurrent-games must be positive")
+    if args.maximum_prepared_gib <= 0 or args.maximum_cache_gib <= 0:
+        raise ValueError("storage limits must be positive")
     if not args.checkpoint.is_dir() or not args.team_file.is_file():
         raise FileNotFoundError("The source checkpoint or fixed player team is missing")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,9 +175,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             progress_every=args.progress_every,
             resume=True,
             require_outcome=True,
+            maximum_unmapped_fraction=args.maximum_unmapped_fraction,
+            maximum_output_bytes=int(args.maximum_prepared_gib * 1024**3),
         )
         manifest["phases"]["prepare"] = prepared["summary"]
+        prepared_rows = sum(
+            int(value)
+            for value in prepared["summary"]["transitions_per_split"].values()
+        )
+        estimated_cache_bytes = _estimated_interaction_cache_bytes(prepared_rows)
+        manifest["phases"]["storage_guard"] = {
+            "prepared_limit_gib": args.maximum_prepared_gib,
+            "cache_limit_gib": args.maximum_cache_gib,
+            "prepared_rows": prepared_rows,
+            "estimated_cache_gib": round(estimated_cache_bytes / 1024**3, 2),
+        }
         _write_manifest(run_manifest_path, manifest)
+        maximum_cache_bytes = int(args.maximum_cache_gib * 1024**3)
+        if estimated_cache_bytes > maximum_cache_bytes:
+            raise RuntimeError(
+                "Estimated interaction cache exceeds its storage limit: "
+                f"{estimated_cache_bytes / 1024**3:.2f} GiB required, maximum is "
+                f"{args.maximum_cache_gib:.2f} GiB. Reduce --trajectory-sample-rate "
+                "or increase --maximum-cache-gib."
+            )
 
         cache_dir = args.output_dir / "02-interaction-cache"
         cache = build_parallel_interaction_caches(
@@ -297,7 +332,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Retain downloaded self-play archives after a successful pipeline run.",
     )
-    parser.add_argument("--trajectory-sample-rate", type=float, default=0.05)
+    parser.add_argument("--trajectory-sample-rate", type=float, default=0.005)
+    parser.add_argument("--maximum-prepared-gib", type=float, default=32.0)
+    parser.add_argument("--maximum-cache-gib", type=float, default=16.0)
+    parser.add_argument("--maximum-unmapped-fraction", type=float, default=0.01)
     parser.add_argument("--train-fraction", type=float, default=0.9)
     parser.add_argument("--validation-fraction", type=float, default=0.05)
     parser.add_argument("--workers", type=int, default=4)

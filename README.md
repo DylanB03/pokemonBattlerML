@@ -28,10 +28,12 @@ expanded TAR copies, prepares trajectory shards with four worker processes,
 builds the numeric interaction caches four at a time, trains with four
 data-loader workers, and evaluates four local games concurrently. Sampled-out
 members bypass inner JSON decoding. Completed shards and caches are reused after
-an interruption. The default 5% deterministic sample is already much broader
-than the six-team teacher runs; use
+an interruption. The default 0.5% deterministic sample is projected to retain
+about 34,800 complete trajectories and 1.27 million decisions from the two
+Gen 9 OU archives. Hard limits stop preparation above 32 GiB and stop before
+cache construction when the cache estimate exceeds 16 GiB. Use
 `--trajectory-sample-rate 1` only if there is enough disk for the full Gen 9
-portion of both archives.
+portion of both archives and the two storage guards are explicitly increased.
 
 This does not run four copies of Qwen on one GPU. The sidecar learns from the
 same mechanics, roster, candidate, and four-event history tensors already used

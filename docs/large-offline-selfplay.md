@@ -39,14 +39,22 @@ prepared rows still retain the visible roster and history, so their exact disk
 cost depends on the selected battles. The command prints free disk at startup
 but does not guess a safe cutoff.
 
-The default selects a deterministic 5% of Gen 9 OU trajectories. This is a
-coverage/space compromise, not a claim that 5% is optimal. To use every Gen 9
-trajectory:
+The two downloaded Gen 9 OU archives contain 6,961,526 trajectories. The
+default selects a deterministic 0.5%, projected from the measured 5% partial
+run to retain about 34,800 complete trajectories and 1.27 million decisions.
+That is a coverage/space compromise, not a claim that 0.5% is optimal. The
+default storage guards stop prepared output above 32 GiB and stop before cache
+construction if its exact shape-based estimate exceeds 16 GiB. These can be
+changed with `--maximum-prepared-gib` and `--maximum-cache-gib`.
+
+To use every Gen 9 trajectory on a machine with hundreds of GiB available:
 
 ```bash
 python -m pokemon_battler.large_offline_pipeline \
   --output-dir outputs/metamon-large-full-v1 \
-  --trajectory-sample-rate 1
+  --trajectory-sample-rate 1 \
+  --maximum-prepared-gib 300 \
+  --maximum-cache-gib 120
 ```
 
 To use data that has already been downloaded under `data/metamon-large/`, add
@@ -57,6 +65,12 @@ resume rescans the source stream up to that shard without decoding sampled-out
 members. It does not recreate an uncompressed archive. By default, downloaded
 self-play archives are deleted only after the entire pipeline completes. Add
 `--keep-compressed` if they should remain available for a separate future run.
+
+The source contains a small fraction of recorded actions that cannot be
+reconstructed from the visible legal-action state. Those rows are dropped and
+reported. The large pipeline permits at most 1%; the measured partial corpus
+was approximately 0.44%. This is still a compatibility gate, but it no longer
+rejects a corpus with more than 99% recoverable action parity.
 
 ## Where four-way parallelism is useful
 

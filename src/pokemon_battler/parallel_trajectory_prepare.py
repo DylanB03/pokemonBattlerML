@@ -286,7 +286,7 @@ def _configuration_sha256(configuration: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _write_offsets(path: Path, offsets: list[int]) -> None:
+def _write_offsets(path: Path, offsets: list[int]) -> int:
     offsets_path = path.with_suffix(path.suffix + ".offsets.npy")
     metadata_path = path.with_suffix(path.suffix + ".offsets.json")
     with offsets_path.open("wb") as stream:
@@ -303,6 +303,7 @@ def _write_offsets(path: Path, offsets: list[int]) -> None:
         + "\n",
         encoding="utf-8",
     )
+    return offsets_path.stat().st_size + metadata_path.stat().st_size
 
 
 def _commit_shard(
@@ -314,6 +315,7 @@ def _commit_shard(
     counters: Counter[str] = Counter()
     battle_counts: Counter[str] = Counter()
     row_counts: Counter[str] = Counter()
+    output_bytes = 0
     for result in results:
         counters.update(result.counters)
         if result.split is not None and result.rows:
@@ -340,13 +342,14 @@ def _commit_shard(
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(partial, destination)
-        _write_offsets(destination, offsets)
+        output_bytes += destination.stat().st_size + _write_offsets(destination, offsets)
         files[split] = str(destination.relative_to(output_dir))
     return {
         "shard": shard_index,
         "source_start": results[0].sequence,
         "source_end": results[-1].sequence + 1,
         "source_items": len(results),
+        "output_bytes": output_bytes,
         "files": files,
         "rows": dict(row_counts),
         "trajectories": dict(battle_counts),
@@ -365,6 +368,12 @@ def _aggregate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     checked_actions = counters["transitions_written"] + counters["actions_not_recoverably_legal"]
     manifest["summary"] = {
         "source_items": sum(int(shard["source_items"]) for shard in manifest["shards"]),
+        "output_bytes": sum(int(shard.get("output_bytes", 0)) for shard in manifest["shards"]),
+        "output_gib": round(
+            sum(int(shard.get("output_bytes", 0)) for shard in manifest["shards"])
+            / 1024**3,
+            2,
+        ),
         "transitions_per_split": dict(rows),
         "trajectories_per_split": dict(trajectories),
         "counters": dict(counters),
@@ -405,6 +414,7 @@ def prepare_trajectory_dataset_parallel(
     resume: bool = True,
     require_outcome: bool = False,
     maximum_unmapped_fraction: float | None = 0.001,
+    maximum_output_bytes: int | None = None,
 ) -> dict[str, Any]:
     if workers <= 0 or shard_trajectories <= 0:
         raise ValueError("workers and shard_trajectories must be positive")
@@ -414,6 +424,8 @@ def prepare_trajectory_dataset_parallel(
         raise ValueError("outcome must be both, wins, or losses")
     if maximum_unmapped_fraction is not None and not 0 <= maximum_unmapped_fraction <= 1:
         raise ValueError("maximum_unmapped_fraction must be between zero and one")
+    if maximum_output_bytes is not None and maximum_output_bytes <= 0:
+        raise ValueError("maximum_output_bytes must be positive")
     settings = WorkerSettings(
         split_config=split_config,
         battle_format=battle_format,
@@ -449,6 +461,7 @@ def prepare_trajectory_dataset_parallel(
             "configuration_sha256": configuration_hash,
             "status": "running",
             "workers": workers,
+            "maximum_output_bytes": maximum_output_bytes,
             "shards": [],
         }
         _write_manifest(manifest_path, manifest)
@@ -461,6 +474,18 @@ def prepare_trajectory_dataset_parallel(
     shard_results: list[PreparedResult] = []
     next_sequence = completed_sources
 
+    def enforce_output_limit() -> None:
+        if maximum_output_bytes is None:
+            return
+        output_bytes = sum(int(shard.get("output_bytes", 0)) for shard in manifest["shards"])
+        if output_bytes > maximum_output_bytes:
+            raise RuntimeError(
+                "Prepared dataset exceeded its storage limit: "
+                f"{output_bytes / 1024**3:.2f} GiB written, maximum is "
+                f"{maximum_output_bytes / 1024**3:.2f} GiB. Reduce "
+                "--trajectory-sample-rate or increase --maximum-output-gib."
+            )
+
     def accept_ready() -> None:
         nonlocal next_sequence, next_shard, shard_results
         while next_sequence in ready:
@@ -472,6 +497,7 @@ def prepare_trajectory_dataset_parallel(
                 manifest["status"] = "running"
                 manifest["elapsed_seconds"] = round(time.monotonic() - started, 1)
                 _write_manifest(manifest_path, manifest)
+                enforce_output_limit()
                 next_shard += 1
                 shard_results = []
                 print(
@@ -550,6 +576,7 @@ def prepare_trajectory_dataset_parallel(
         if shard_results:
             shard = _commit_shard(output_dir, next_shard, shard_results)
             manifest["shards"].append(shard)
+            enforce_output_limit()
         _aggregate_manifest(manifest)
         unmapped_fraction = float(manifest["summary"]["action_parity"]["unmapped_fraction"])
         if maximum_unmapped_fraction is not None and unmapped_fraction > maximum_unmapped_fraction:
@@ -599,6 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--require-outcome", action="store_true")
     parser.add_argument("--maximum-unmapped-fraction", type=float, default=0.001)
+    parser.add_argument("--maximum-output-gib", type=float)
     return parser
 
 
@@ -626,6 +654,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         resume=args.resume,
         require_outcome=args.require_outcome,
         maximum_unmapped_fraction=args.maximum_unmapped_fraction,
+        maximum_output_bytes=(
+            None
+            if args.maximum_output_gib is None
+            else int(args.maximum_output_gib * 1024**3)
+        ),
     )
 
 

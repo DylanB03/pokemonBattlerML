@@ -14,7 +14,10 @@ import torch
 from safetensors.torch import save_file as save_safetensors
 
 from pokemon_battler.interaction_modeling import InteractionPolicyHead
-from pokemon_battler.large_offline_pipeline import build_parser
+from pokemon_battler.large_offline_pipeline import (
+    _estimated_interaction_cache_bytes,
+    build_parser,
+)
 from pokemon_battler.metamon_assets import download_selfplay
 from pokemon_battler.parallel_interaction_cache import build_parallel_interaction_caches
 from pokemon_battler.parallel_trajectory_prepare import (
@@ -43,8 +46,12 @@ class LargeOfflineTests(unittest.TestCase):
         args = build_parser().parse_args(["--output-dir", "outputs/test-large"])
         self.assertEqual(args.workers, 4)
         self.assertEqual(args.concurrent_games, 4)
-        self.assertEqual(args.trajectory_sample_rate, 0.05)
+        self.assertEqual(args.trajectory_sample_rate, 0.005)
+        self.assertEqual(args.maximum_prepared_gib, 32.0)
+        self.assertEqual(args.maximum_cache_gib, 16.0)
+        self.assertEqual(args.maximum_unmapped_fraction, 0.01)
         self.assertEqual(args.batch_size, 128)
+        self.assertGreater(_estimated_interaction_cache_bytes(1), 9_000)
 
     def test_parallel_preparation_cache_and_resume_preserve_action_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -185,6 +192,28 @@ class LargeOfflineTests(unittest.TestCase):
             self.assertTrue(archive.is_file())
             self.assertFalse((root / "gen9ou.tar").exists())
             self.assertFalse((root / "gen9ou.tar.partial").exists())
+
+            limited = root / "prepared-with-limit"
+            with (
+                redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(RuntimeError, "exceeded its storage limit"),
+            ):
+                prepare_trajectory_dataset_parallel(
+                    [archive],
+                    limited,
+                    split_config=SplitConfig(
+                        seed=42, train_fraction=0.6, validation_fraction=0.2
+                    ),
+                    workers=2,
+                    shard_trajectories=3,
+                    progress_every=0,
+                    require_outcome=True,
+                    maximum_output_bytes=1,
+                )
+            limited_manifest = json.loads(
+                (limited / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(limited_manifest["status"], "interrupted")
 
     def test_sampled_out_stream_member_is_not_decoded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
