@@ -31,11 +31,13 @@ python -m pokemon_battler.large_offline_pipeline \
   --output-dir outputs/metamon-large-v1
 ```
 
-The first run downloads large archives. It can use considerably more disk than
-the existing 19 GB compressed replay file because the official self-play files
-are decompressed to seekable tar archives and the prepared rows retain the
-visible roster and history. The command prints free disk at startup but does
-not guess a safe cutoff.
+The first run downloads large archives, but it does not expand them into
+uncompressed tar files. Each outer `.tar.lz4` is read as one sequential stream.
+The member filename is checked against the deterministic trajectory sample
+before its inner JSON.LZ4 payload is decoded or submitted to a worker. The
+prepared rows still retain the visible roster and history, so their exact disk
+cost depends on the selected battles. The command prints free disk at startup
+but does not guess a safe cutoff.
 
 The default selects a deterministic 5% of Gen 9 OU trajectories. This is a
 coverage/space compromise, not a claim that 5% is optimal. To use every Gen 9
@@ -50,7 +52,11 @@ python -m pokemon_battler.large_offline_pipeline \
 To use data that has already been downloaded under `data/metamon-large/`, add
 `--skip-download`. A completed output directory is returned immediately. An
 interrupted preparation resumes after its last committed shard; completed
-feature-cache shards are also reused.
+feature-cache shards are also reused. Because compressed TAR.LZ4 is sequential,
+resume rescans the source stream up to that shard without decoding sampled-out
+members. It does not recreate an uncompressed archive. By default, downloaded
+self-play archives are deleted only after the entire pipeline completes. Add
+`--keep-compressed` if they should remain available for a separate future run.
 
 ## Where four-way parallelism is useful
 
@@ -71,11 +77,11 @@ and memory bandwidth. This pipeline therefore does not encode every offline row
 with Qwen. It trains the structured part in large batches and loads Qwen once
 for deployment and battle evaluation.
 
-Uncompressed `.tar` inputs can be streamed directly. A legacy `.tar.gz` still
-has one sequential outer decompression stream, but JSON parsing, LZ4 decoding,
-state enrichment, and feature generation are pipelined across workers. The
-worker queue is bounded so a large archive cannot fill RAM with pending battle
-payloads.
+Uncompressed `.tar`, legacy `.tar.gz`, and official `.tar.lz4` inputs are all
+streamed directly. Compressed archives have one sequential outer decompression
+stream, while selected inner JSON parsing, LZ4 decoding, state enrichment, and
+feature generation are pipelined across workers. The worker queue is bounded so
+a large archive cannot fill RAM with pending battle payloads.
 
 ## The deployed model
 

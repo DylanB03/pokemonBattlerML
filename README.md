@@ -23,11 +23,13 @@ python -m pokemon_battler.large_offline_pipeline \
 ```
 
 The command downloads the two Gen 9 OU archives and the current general/high
-ladder team sets, prepares trajectory shards with four worker processes, builds
-the numeric interaction caches four at a time, trains with four data-loader
-workers, and evaluates four local games concurrently. Completed shards and
-caches are reused after an interruption. The default 5% deterministic sample is
-already much broader than the six-team teacher runs; use
+ladder team sets, streams the compressed self-play archives without writing
+expanded TAR copies, prepares trajectory shards with four worker processes,
+builds the numeric interaction caches four at a time, trains with four
+data-loader workers, and evaluates four local games concurrently. Sampled-out
+members bypass inner JSON decoding. Completed shards and caches are reused after
+an interruption. The default 5% deterministic sample is already much broader
+than the six-team teacher runs; use
 `--trajectory-sample-rate 1` only if there is enough disk for the full Gen 9
 portion of both archives.
 

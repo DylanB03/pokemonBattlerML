@@ -803,13 +803,17 @@ good hard target. It still cannot say which unplayed move would have won; only
 a search trace or simulator branch can supply that counterfactual.
 
 The data path had to change with the model. The old preparation loop decoded a
-20 GB archive sequentially and wrote one monolithic split. The new path keeps
-one bounded archive stream, sends inner decompression and state construction to
-four spawned workers, commits atomic JSONL shards, and records a manifest after
+20 GB archive sequentially and wrote one monolithic split. An initial version
+of the larger pipeline also made the mistake of expanding the official outer
+TAR.LZ4 before sampling. The corrected path reads that compressed archive
+directly, rejects sampled-out members from their filenames before inner JSON
+decoding, and sends selected decompression and state construction to four
+spawned workers. It commits atomic JSONL shards and records a manifest after
 each shard. Feature caches are built four shards at a time. Each JSONL shard has
 a binary byte-offset index, and actions, outcomes, and battle lengths are cached
 next to the mechanics arrays so later epochs do not parse the large JSON again.
-Restarting a run reuses every completed shard.
+Restarting a run reuses every completed shard; a compressed stream must be
+rescanned to reach the saved boundary, but no expanded TAR is written.
 
 I also added a parity gate before treating Metamon as compatible. Both projects
 say A0 through A3 are sorted moves, A4 through A8 are sorted switches, and A9

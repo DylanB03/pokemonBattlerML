@@ -18,7 +18,7 @@ from pokemon_battler.actions import (
 )
 
 SUPPORTED_FILE_SUFFIXES = (".json", ".json.lz4")
-SUPPORTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz")
+SUPPORTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tar.lz4", ".tgz")
 
 
 @dataclass(frozen=True)
@@ -92,19 +92,37 @@ def _decode_payload(name: str, stream: BinaryIO) -> bytes:
     return stream.read()
 
 
+def _iter_tar_members(path: Path, archive: tarfile.TarFile) -> Iterator[TrajectorySource]:
+    for member in archive:
+        if not member.isfile() or not _has_suffix(member.name, SUPPORTED_FILE_SUFFIXES):
+            continue
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            continue
+        with extracted:
+            yield TrajectorySource(
+                name=f"{path.name}:{member.name}",
+                payload=_decode_payload(member.name, extracted),
+            )
+
+
 def _iter_tar(path: Path) -> Iterator[TrajectorySource]:
+    if path.name.lower().endswith(".tar.lz4"):
+        try:
+            import lz4.frame
+        except ImportError as exc:
+            raise RuntimeError(
+                "Reading .tar.lz4 archives requires the 'lz4' package. "
+                "Install the project dependencies first."
+            ) from exc
+        with (
+            lz4.frame.open(path, mode="rb") as compressed,
+            tarfile.open(fileobj=compressed, mode="r|") as archive,
+        ):
+            yield from _iter_tar_members(path, archive)
+        return
     with tarfile.open(path, mode="r:*") as archive:
-        for member in archive:
-            if not member.isfile() or not _has_suffix(member.name, SUPPORTED_FILE_SUFFIXES):
-                continue
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                continue
-            with extracted:
-                yield TrajectorySource(
-                    name=f"{path.name}:{member.name}",
-                    payload=_decode_payload(member.name, extracted),
-                )
+        yield from _iter_tar_members(path, archive)
 
 
 def _iter_path(path: Path) -> Iterator[TrajectorySource]:
@@ -162,7 +180,7 @@ def parse_replay_metadata(source_name: str) -> ReplayMetadata:
     handled by Metamon itself while keeping both POV files grouped by battle ID.
     """
     member_or_path = source_name
-    for marker in (".tar.gz:", ".tgz:", ".tar:"):
+    for marker in (".tar.lz4:", ".tar.gz:", ".tgz:", ".tar:"):
         if marker in source_name:
             member_or_path = source_name.split(marker, 1)[1]
             break

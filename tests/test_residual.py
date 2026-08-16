@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,8 +26,8 @@ from pokemon_battler.residual_pipeline import (
     _manifest_teams,
     _validate_source_and_replay_caches,
     build_parser,
-    run as run_residual_pipeline,
 )
+from pokemon_battler.residual_pipeline import run as run_residual_pipeline
 from pokemon_battler.residual_train import train_residual_policy
 from pokemon_battler.trajectory_cache import ARRAY_SPECS, TRAJECTORY_CACHE_SCHEMA
 
@@ -150,12 +151,39 @@ class ResidualPolicyTests(unittest.TestCase):
         ]
         return [SimpleNamespace(team=str(team)) for team in training]
 
+    @staticmethod
+    def _isolated_pipeline_args(root: Path) -> Namespace:
+        output = root / "run"
+        args = build_parser().parse_args(["--output-dir", str(output)])
+        signature = checkpoint_signature(args.checkpoint)
+        for split in ("train", "validation"):
+            cache = root / "replay-cache" / split
+            cache.mkdir(parents=True)
+            (cache / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "schema": TRAJECTORY_CACHE_SCHEMA,
+                        "checkpoint_signature": signature,
+                        "rows": 1,
+                        "d_model": 8,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        args.replay_train_cache = root / "replay-cache" / "train"
+        args.replay_validation_cache = root / "replay-cache" / "validation"
+        teacher_data = root / "teacher-data.jsonl"
+        teacher_data.write_text("{}\n", encoding="utf-8")
+        args.teacher_data = [teacher_data]
+        return args
+
     def test_pipeline_promotes_only_after_both_gates_and_writes_absolute_pointer(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "run"
-            args = build_parser().parse_args(["--output-dir", str(output)])
+            root = Path(temporary)
+            output = root / "run"
+            args = self._isolated_pipeline_args(root)
             references = self._selected_teacher_references()
             with (
                 patch(
@@ -194,8 +222,9 @@ class ResidualPolicyTests(unittest.TestCase):
 
     def test_pipeline_failure_restores_absolute_champion_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "run"
-            args = build_parser().parse_args(["--output-dir", str(output)])
+            root = Path(temporary)
+            output = root / "run"
+            args = self._isolated_pipeline_args(root)
             references = self._selected_teacher_references()
             with (
                 patch(
@@ -213,9 +242,9 @@ class ResidualPolicyTests(unittest.TestCase):
                 ),
                 patch("pokemon_battler.residual_pipeline._release_memory"),
                 redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(RuntimeError, "deliberate failure"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "deliberate failure"):
-                    run_residual_pipeline(args)
+                run_residual_pipeline(args)
             champion = args.checkpoint.resolve()
             self.assertEqual(
                 (output / "selected_checkpoint.txt").read_text().strip(),
@@ -230,48 +259,49 @@ class ResidualPolicyTests(unittest.TestCase):
             (False, [], "offline_gate_failed"),
             (True, [{"promoted": False}], "heldout_pilot_failed"),
         ):
-            with self.subTest(expected_decision=expected_decision):
-                with tempfile.TemporaryDirectory() as temporary:
-                    output = Path(temporary) / "run"
-                    args = build_parser().parse_args(["--output-dir", str(output)])
-                    references = self._selected_teacher_references()
-                    with (
-                        patch(
-                            "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
-                            return_value=(
-                                references,
-                                references,
-                                {"strategy": "test"},
-                            ),
+            with (
+                self.subTest(expected_decision=expected_decision),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                output = root / "run"
+                args = self._isolated_pipeline_args(root)
+                references = self._selected_teacher_references()
+                with (
+                    patch(
+                        "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                        return_value=(
+                            references,
+                            references,
+                            {"strategy": "test"},
                         ),
-                        patch("pokemon_battler.residual_pipeline._copy_references"),
-                        patch(
-                            "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
-                            return_value={"rows": 1},
-                        ),
-                        patch(
-                            "pokemon_battler.residual_pipeline.train_residual_policy",
-                            return_value={
-                                "offline_gate": {"passed": offline_passed}
-                            },
-                        ),
-                        patch(
-                            "pokemon_battler.residual_pipeline.run_policy_suite",
-                            side_effect=suite_results,
-                        ) as suite,
-                        patch("pokemon_battler.residual_pipeline._release_memory"),
-                        redirect_stdout(io.StringIO()),
-                    ):
-                        report = run_residual_pipeline(args)
-                    champion = args.checkpoint.resolve()
-                    self.assertFalse(report["promoted"])
-                    self.assertEqual(report["selected_checkpoint"], str(champion))
-                    self.assertEqual(report["promotion_decision"], expected_decision)
-                    self.assertEqual(suite.call_count, len(suite_results))
-                    self.assertEqual(
-                        (output / "selected_checkpoint.txt").read_text().strip(),
-                        str(champion),
-                    )
+                    ),
+                    patch("pokemon_battler.residual_pipeline._copy_references"),
+                    patch(
+                        "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                        return_value={"rows": 1},
+                    ),
+                    patch(
+                        "pokemon_battler.residual_pipeline.train_residual_policy",
+                        return_value={"offline_gate": {"passed": offline_passed}},
+                    ),
+                    patch(
+                        "pokemon_battler.residual_pipeline.run_policy_suite",
+                        side_effect=suite_results,
+                    ) as suite,
+                    patch("pokemon_battler.residual_pipeline._release_memory"),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    report = run_residual_pipeline(args)
+                champion = args.checkpoint.resolve()
+                self.assertFalse(report["promoted"])
+                self.assertEqual(report["selected_checkpoint"], str(champion))
+                self.assertEqual(report["promotion_decision"], expected_decision)
+                self.assertEqual(suite.call_count, len(suite_results))
+                self.assertEqual(
+                    (output / "selected_checkpoint.txt").read_text().strip(),
+                    str(champion),
+                )
 
     def test_tiny_cached_training_writes_reloadable_residual(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

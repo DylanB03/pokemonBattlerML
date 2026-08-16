@@ -7,12 +7,15 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+import lz4.frame
 import torch
 from safetensors.torch import save_file as save_safetensors
 
 from pokemon_battler.interaction_modeling import InteractionPolicyHead
 from pokemon_battler.large_offline_pipeline import build_parser
+from pokemon_battler.metamon_assets import download_selfplay
 from pokemon_battler.parallel_interaction_cache import build_parallel_interaction_caches
 from pokemon_battler.parallel_trajectory_prepare import (
     prepare_trajectory_dataset_parallel,
@@ -31,6 +34,7 @@ from pokemon_battler.structured_train import (
 )
 from pokemon_battler.team_manifest import build_team_manifests
 from pokemon_battler.training_data import ShardedJsonlDataset
+from pokemon_battler.trajectory_prepare import _trajectory_is_selected
 from tests.helpers import state, terminal_state
 
 
@@ -139,6 +143,98 @@ class LargeOfflineTests(unittest.TestCase):
                 candidate_metadata["structured_policy_schema"],
                 STRUCTURED_POLICY_SCHEMA,
             )
+
+    def test_outer_lz4_tar_streams_without_writing_an_uncompressed_tar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw_tar = io.BytesIO()
+            with tarfile.open(fileobj=raw_tar, mode="w") as stream:
+                for index in range(8):
+                    payload = json.dumps(
+                        {
+                            "states": [state(), terminal_state()],
+                            "actions": [0, -1],
+                        }
+                    ).encode()
+                    inner_payload = lz4.frame.compress(payload)
+                    info = tarfile.TarInfo(
+                        "gen9ou/"
+                        f"battle-{index}_1800_a_vs_b_01-02-2025_"
+                        f"{'WIN' if index % 2 else 'LOSS'}.json.lz4"
+                    )
+                    info.size = len(inner_payload)
+                    stream.addfile(info, io.BytesIO(inner_payload))
+            archive = root / "gen9ou.tar.lz4"
+            archive.write_bytes(lz4.frame.compress(raw_tar.getvalue()))
+
+            with redirect_stdout(io.StringIO()):
+                report = prepare_trajectory_dataset_parallel(
+                    [archive],
+                    root / "prepared",
+                    split_config=SplitConfig(
+                        seed=42, train_fraction=0.6, validation_fraction=0.2
+                    ),
+                    workers=2,
+                    shard_trajectories=3,
+                    progress_every=0,
+                    require_outcome=True,
+                )
+
+            self.assertEqual(report["summary"]["source_items"], 8)
+            self.assertEqual(sum(report["summary"]["transitions_per_split"].values()), 8)
+            self.assertTrue(archive.is_file())
+            self.assertFalse((root / "gen9ou.tar").exists())
+            self.assertFalse((root / "gen9ou.tar.partial").exists())
+
+    def test_sampled_out_stream_member_is_not_decoded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            index = 0
+            while _trajectory_is_selected(
+                f"battle-{index}", seed=42, sample_rate=0.05
+            ):
+                index += 1
+            raw_tar = io.BytesIO()
+            with tarfile.open(fileobj=raw_tar, mode="w") as stream:
+                invalid_payload = b"this is deliberately not trajectory JSON"
+                info = tarfile.TarInfo(
+                    "gen9ou/"
+                    f"battle-{index}_1800_a_vs_b_01-02-2025_WIN.json"
+                )
+                info.size = len(invalid_payload)
+                stream.addfile(info, io.BytesIO(invalid_payload))
+            archive = root / "gen9ou.tar.lz4"
+            archive.write_bytes(lz4.frame.compress(raw_tar.getvalue()))
+
+            with redirect_stdout(io.StringIO()):
+                report = prepare_trajectory_dataset_parallel(
+                    [archive],
+                    root / "prepared",
+                    split_config=SplitConfig(seed=42),
+                    trajectory_sample_rate=0.05,
+                    workers=1,
+                    shard_trajectories=1,
+                    progress_every=0,
+                    require_outcome=True,
+                )
+
+            counters = report["summary"]["counters"]
+            self.assertEqual(counters["trajectories_sampled_out"], 1)
+            self.assertNotIn("decode_errors", counters)
+
+    def test_selfplay_download_keeps_the_outer_archive_compressed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            downloaded = root / "download" / "gen9ou.tar.lz4"
+            downloaded.parent.mkdir()
+            downloaded.write_bytes(b"compressed archive fixture")
+            with patch(
+                "pokemon_battler.metamon_assets._download_file",
+                return_value=downloaded,
+            ):
+                result = download_selfplay(root, subset="pac-base")
+            self.assertEqual(result, downloaded)
+            self.assertFalse((root / "self-play" / "pac-base" / "gen9ou.tar").exists())
 
     def test_structured_sidecar_reuses_interaction_weights_without_disabling_qwen(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

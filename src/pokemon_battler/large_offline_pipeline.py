@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from argparse import Namespace
 from collections.abc import Sequence
@@ -29,7 +30,27 @@ from pokemon_battler.team_manifest import build_team_manifests
 
 
 def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    partial = path.with_suffix(path.suffix + ".partial")
+    partial.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(partial, path)
+
+
+def _remove_streamed_selfplay_archives(paths: Sequence[str]) -> dict[str, Any]:
+    removed: list[str] = []
+    removed_bytes = 0
+    for value in paths:
+        path = Path(value)
+        if not path.name.lower().endswith(".tar.lz4") or not path.is_file():
+            continue
+        removed_bytes += path.stat().st_size
+        path.unlink()
+        removed.append(str(path))
+    return {
+        "removed": removed,
+        "removed_gib": round(removed_bytes / 1024**3, 2),
+    }
 
 
 def _load_complete(path: Path) -> dict[str, Any] | None:
@@ -226,6 +247,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         selected = selected.resolve()
         manifest["selected_checkpoint"] = str(selected)
         selected_pointer.write_text(str(selected) + "\n", encoding="utf-8")
+        if not args.keep_compressed:
+            manifest["phases"]["source_cleanup"] = _remove_streamed_selfplay_archives(
+                assets["selfplay"]
+            )
         manifest["status"] = "complete"
         _write_manifest(run_manifest_path, manifest)
         print(json.dumps(manifest, indent=2, sort_keys=True))
@@ -233,7 +258,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     except BaseException as exc:
         manifest["status"] = "interrupted"
         manifest["error"] = f"{type(exc).__name__}: {exc}"
-        _write_manifest(run_manifest_path, manifest)
+        try:
+            _write_manifest(run_manifest_path, manifest)
+        except OSError as manifest_error:
+            print(
+                json.dumps(
+                    {
+                        "phase": "manifest-write-failed",
+                        "original_error": manifest["error"],
+                        "manifest_error": (
+                            f"{type(manifest_error).__name__}: {manifest_error}"
+                        ),
+                    }
+                ),
+                flush=True,
+            )
         raise
 
 
@@ -253,7 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--selfplay-revision", default="main")
     parser.add_argument("--teams-revision", default="v5")
     parser.add_argument("--skip-download", action="store_true")
-    parser.add_argument("--keep-compressed", action="store_true")
+    parser.add_argument(
+        "--keep-compressed",
+        action="store_true",
+        help="Retain downloaded self-play archives after a successful pipeline run.",
+    )
     parser.add_argument("--trajectory-sample-rate", type=float, default=0.05)
     parser.add_argument("--train-fraction", type=float, default=0.9)
     parser.add_argument("--validation-fraction", type=float, default=0.05)

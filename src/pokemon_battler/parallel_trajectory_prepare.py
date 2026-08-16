@@ -46,7 +46,9 @@ ACTION_CONTRACT = {
 @dataclass(frozen=True)
 class EncodedTrajectorySource:
     name: str
-    payload: bytes
+    payload: bytes | None
+    filtered_battle_id: str | None = None
+    filtered_counters: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,44 +77,105 @@ def _has_suffix(name: str, suffixes: Sequence[str]) -> bool:
     return any(lowered.endswith(suffix) for suffix in suffixes)
 
 
-def _iter_tar_encoded(path: Path) -> Iterator[EncodedTrajectorySource]:
+def _metadata_filter(
+    name: str,
+    settings: WorkerSettings | None,
+) -> EncodedTrajectorySource | None:
+    if settings is None:
+        return None
+    counters: Counter[str] = Counter(trajectories_seen=1)
+    metadata = parse_replay_metadata(name)
+    if settings.require_outcome and metadata.outcome not in {"WIN", "LOSS"}:
+        counters["missing_outcome_filtered"] += 1
+    elif settings.min_rating is not None and metadata.rating < settings.min_rating:
+        counters["rating_filtered"] += 1
+    elif (settings.outcome == "wins" and metadata.outcome != "WIN") or (
+        settings.outcome == "losses" and metadata.outcome != "LOSS"
+    ):
+        counters["outcome_filtered"] += 1
+    elif not _trajectory_is_selected(
+        metadata.battle_id,
+        seed=settings.split_config.seed,
+        sample_rate=settings.trajectory_sample_rate,
+    ):
+        counters["trajectories_sampled_out"] += 1
+    else:
+        return None
+    return EncodedTrajectorySource(
+        name=name,
+        payload=None,
+        filtered_battle_id=metadata.battle_id,
+        filtered_counters=dict(counters),
+    )
+
+
+def _iter_tar_members_encoded(
+    path: Path,
+    archive: tarfile.TarFile,
+    settings: WorkerSettings | None,
+) -> Iterator[EncodedTrajectorySource]:
+    for member in archive:
+        if not member.isfile() or not _has_suffix(member.name, SUPPORTED_FILE_SUFFIXES):
+            continue
+        name = f"{path.name}:{member.name}"
+        filtered = _metadata_filter(name, settings)
+        if filtered is not None:
+            yield filtered
+            continue
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            continue
+        with extracted:
+            yield EncodedTrajectorySource(name=name, payload=extracted.read())
+
+
+def _iter_tar_encoded(
+    path: Path,
+    settings: WorkerSettings | None,
+) -> Iterator[EncodedTrajectorySource]:
+    if path.name.lower().endswith(".tar.lz4"):
+        import lz4.frame
+
+        with (
+            lz4.frame.open(path, mode="rb") as compressed,
+            tarfile.open(fileobj=compressed, mode="r|") as archive,
+        ):
+            yield from _iter_tar_members_encoded(path, archive, settings)
+        return
     with tarfile.open(path, mode="r:*") as archive:
-        for member in archive:
-            if not member.isfile() or not _has_suffix(member.name, SUPPORTED_FILE_SUFFIXES):
-                continue
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                continue
-            with extracted:
-                yield EncodedTrajectorySource(
-                    name=f"{path.name}:{member.name}", payload=extracted.read()
-                )
+        yield from _iter_tar_members_encoded(path, archive, settings)
 
 
 def iter_encoded_trajectory_sources(
     paths: Sequence[Path],
+    *,
+    settings: WorkerSettings | None = None,
 ) -> Iterator[EncodedTrajectorySource]:
-    """Read archive members once; LZ4/JSON decoding happens in worker processes."""
+    """Stream archive members once; selected LZ4/JSON payloads decode in workers."""
     for path in paths:
         if not path.exists():
             raise FileNotFoundError(path)
         if path.is_dir():
             for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
                 if _has_suffix(child.name, SUPPORTED_TAR_SUFFIXES):
-                    yield from _iter_tar_encoded(child)
+                    yield from _iter_tar_encoded(child, settings)
                 elif _has_suffix(child.name, SUPPORTED_FILE_SUFFIXES):
-                    yield EncodedTrajectorySource(str(child), child.read_bytes())
+                    filtered = _metadata_filter(str(child), settings)
+                    yield filtered or EncodedTrajectorySource(str(child), child.read_bytes())
             continue
         if _has_suffix(path.name, SUPPORTED_TAR_SUFFIXES):
-            yield from _iter_tar_encoded(path)
+            yield from _iter_tar_encoded(path, settings)
         elif _has_suffix(path.name, SUPPORTED_FILE_SUFFIXES):
-            yield EncodedTrajectorySource(str(path), path.read_bytes())
+            filtered = _metadata_filter(str(path), settings)
+            yield filtered or EncodedTrajectorySource(str(path), path.read_bytes())
         else:
             raise ValueError(f"Unsupported trajectory input: {path}")
 
 
 def _decode_trajectory(source: EncodedTrajectorySource) -> dict[str, Any]:
     payload = source.payload
+    if payload is None:
+        raise TypeError(f"Filtered trajectory has no payload: {source.name}")
     if source.name.lower().endswith(".lz4"):
         import lz4.frame
 
@@ -425,24 +488,48 @@ def prepare_trajectory_dataset_parallel(
                     flush=True,
                 )
 
+    def collect_completed(*, block: bool) -> None:
+        if not pending:
+            return
+        if block:
+            completed_futures, _ = wait(pending, return_when=FIRST_COMPLETED)
+        else:
+            completed_futures = {future for future in pending if future.done()}
+        for completed in completed_futures:
+            pending.pop(completed)
+            result = completed.result()
+            ready[result.sequence] = result
+        accept_ready()
+
     try:
         with ProcessPoolExecutor(
             max_workers=workers,
             mp_context=multiprocessing.get_context("spawn"),
         ) as executor:
-            for sequence, source in enumerate(iter_encoded_trajectory_sources(inputs)):
+            for sequence, source in enumerate(
+                iter_encoded_trajectory_sources(inputs, settings=settings)
+            ):
                 if sequence < completed_sources:
+                    continue
+                if source.filtered_counters is not None:
+                    ready[sequence] = PreparedResult(
+                        sequence=sequence,
+                        split=None,
+                        battle_id=source.filtered_battle_id,
+                        rows_jsonl=b"",
+                        rows=0,
+                        counters=source.filtered_counters,
+                    )
+                    accept_ready()
+                    if len(ready) >= workers * 2:
+                        collect_completed(block=True)
                     continue
                 future = executor.submit(_prepare_one, sequence, source, settings)
                 pending[future] = sequence
                 if len(pending) < workers * 2:
+                    collect_completed(block=False)
                     continue
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for completed in done:
-                    pending.pop(completed)
-                    result = completed.result()
-                    ready[result.sequence] = result
-                accept_ready()
+                collect_completed(block=True)
                 if progress_every and next_sequence % progress_every == 0:
                     print(
                         json.dumps(

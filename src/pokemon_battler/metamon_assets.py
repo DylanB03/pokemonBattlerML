@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import tarfile
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -45,49 +43,20 @@ def _download_file(*, repo_id: str, filename: str, root: Path, revision: str) ->
     return Path(downloaded)
 
 
-def _decompress_tar_lz4(source: Path, destination: Path) -> None:
-    import lz4.frame
-
-    partial = destination.with_suffix(destination.suffix + ".partial")
-    if partial.exists():
-        partial.unlink()
-    started = time.monotonic()
-    written = 0
-    with lz4.frame.open(source, "rb") as compressed, partial.open("wb") as output:
-        while True:
-            chunk = compressed.read(64 * 1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-            written += len(chunk)
-            print(
-                json.dumps(
-                    {
-                        "phase": "metamon-decompress",
-                        "source": str(source),
-                        "written_gib": round(written / 1024**3, 2),
-                        "elapsed_seconds": round(time.monotonic() - started, 1),
-                    }
-                ),
-                flush=True,
-            )
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(partial, destination)
-
-
 def download_selfplay(
     root: Path,
     *,
     subset: str,
     battle_format: str = "gen9ou",
     revision: str = "main",
-    keep_compressed: bool = False,
 ) -> Path:
     subset_dir = root / "self-play" / subset
-    destination = subset_dir / f"{battle_format}.tar"
-    if destination.is_file():
-        return destination
+    compressed_path = subset_dir / f"{battle_format}.tar.lz4"
+    if compressed_path.is_file():
+        return compressed_path
+    legacy_tar = subset_dir / f"{battle_format}.tar"
+    if legacy_tar.is_file():
+        return legacy_tar
     compressed = _download_file(
         repo_id=METAMON_SELFPLAY_REPO,
         filename=f"{subset}/{battle_format}.tar.lz4",
@@ -95,10 +64,7 @@ def download_selfplay(
         revision=revision,
     )
     subset_dir.mkdir(parents=True, exist_ok=True)
-    _decompress_tar_lz4(compressed, destination)
-    if not keep_compressed:
-        compressed.unlink(missing_ok=True)
-    return destination
+    return compressed
 
 
 def download_team_set(
@@ -148,7 +114,6 @@ def download_metamon_assets(
             subset=subset,
             battle_format=battle_format,
             revision=selfplay_revision,
-            keep_compressed=keep_compressed,
         )
         for subset in selfplay_subsets
     ]
@@ -163,7 +128,8 @@ def download_metamon_assets(
         for set_name in team_sets
     }
     report = {
-        "schema": "metamon-assets-v1",
+        "schema": "metamon-assets-v2",
+        "selfplay_storage": "streamed-compressed-archive",
         "battle_format": battle_format,
         "selfplay_revision": selfplay_revision,
         "teams_revision": teams_revision,
