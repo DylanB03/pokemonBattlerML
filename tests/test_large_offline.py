@@ -150,6 +150,11 @@ class LargeOfflineTests(unittest.TestCase):
                 candidate_metadata["structured_policy_schema"],
                 STRUCTURED_POLICY_SCHEMA,
             )
+            self.assertEqual(candidate_metadata["scheduler_updates"], training["updates"])
+            self.assertEqual(candidate_metadata["lr_scheduler"], "cosine")
+            self.assertEqual(candidate_metadata["warmup_ratio"], 0.0)
+            self.assertTrue(candidate_metadata["qwen_frozen"])
+            self.assertEqual(candidate_metadata["qwen_learning_rate"], 0.0)
 
     def test_outer_lz4_tar_streams_without_writing_an_uncompressed_tar(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

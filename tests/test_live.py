@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, PropertyMock, patch
 
 from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
@@ -231,6 +232,20 @@ class LivePolicyTests(unittest.TestCase):
         player.team_preview_policy = "random"
         player.random_teampreview = lambda _battle: "/team 321"
         self.assertEqual(player.teampreview(fake_battle()), "/team 321")
+
+    def test_missing_learned_preview_warning_is_emitted_once(self) -> None:
+        player = object.__new__(InteractionPlayer)
+        player.team_preview_policy = "learned"
+        player.runtime = SimpleNamespace(preview_head=None)
+        player._missing_preview_warning_emitted = False
+        logger = Mock()
+
+        with patch.object(
+            InteractionPlayer, "logger", new_callable=PropertyMock, return_value=logger
+        ):
+            self.assertEqual(player.teampreview(fake_battle()), "/team 123")
+            self.assertEqual(player.teampreview(fake_battle()), "/team 123")
+        logger.warning.assert_called_once()
 
     def test_exact_mask_preserves_full_alphabetical_action_slots(self) -> None:
         battle = fake_battle()

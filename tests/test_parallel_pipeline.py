@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from pokemon_battler.parallel_teacher_collect import _merge_traces, _worker_command
-from pokemon_battler.policy_suite import _indexed_results
+from pokemon_battler.policy_suite import _checkpoint_preview_enabled, _indexed_results
 
 
 class ParallelPipelineTests(unittest.TestCase):
@@ -89,6 +89,14 @@ class ParallelPipelineTests(unittest.TestCase):
             _indexed_results(summary),
             {("pbfoulevalw01", 2, "team-b.txt"): 1},
         )
+
+    def test_policy_suite_disables_missing_preview_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkpoint = Path(temporary_directory)
+            self.assertFalse(_checkpoint_preview_enabled(checkpoint, True))
+            (checkpoint / "team_preview_head.safetensors").touch()
+            self.assertTrue(_checkpoint_preview_enabled(checkpoint, True))
+            self.assertFalse(_checkpoint_preview_enabled(checkpoint, False))
 
 
 if __name__ == "__main__":

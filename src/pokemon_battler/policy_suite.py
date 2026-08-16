@@ -16,6 +16,7 @@ from pokemon_battler.live_eval import DEFAULT_TEAM, PLAYER_USERNAME, _run_battle
 from pokemon_battler.poke_env_compat import install_safe_poke_env_shutdown
 from pokemon_battler.showdown_server import LocalShowdownServer
 from pokemon_battler.team_pool import ShuffledTeamPool, resolve_team_pool
+from pokemon_battler.team_preview import has_team_preview_head
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,6 +60,11 @@ def _schedule(team_files: list[Path], games: int, seed: int) -> list[Path]:
         pool.yield_team()
         schedule.append(Path(pool.selections[-1]["team_file"]))
     return schedule
+
+
+def _checkpoint_preview_enabled(checkpoint: Path, requested: bool) -> bool:
+    """Use learned preview only when the requested checkpoint actually provides it."""
+    return bool(requested and has_team_preview_head(checkpoint))
 
 
 def _difference_interval(
@@ -196,8 +202,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     args.output_dir.mkdir(parents=True)
     candidate_action_value_weight = getattr(args, "candidate_action_value_weight", None)
     champion_action_value_weight = getattr(args, "champion_action_value_weight", None)
-    candidate_preview = getattr(args, "candidate_preview", True)
-    champion_preview = getattr(args, "champion_preview", True)
+    candidate_preview = _checkpoint_preview_enabled(
+        args.candidate, getattr(args, "candidate_preview", True)
+    )
+    champion_preview = _checkpoint_preview_enabled(
+        args.champion, getattr(args, "champion_preview", True)
+    )
     with LocalShowdownServer(
         args.showdown_dir,
         port=args.server_port,

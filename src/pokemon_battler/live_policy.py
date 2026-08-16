@@ -446,6 +446,7 @@ class InteractionPlayer(Player):
         self.temporal_previous_action: dict[str, int] = {}
         self.temporal_last_turn: dict[str, int] = {}
         self.temporal_last_prediction: dict[str, InteractionPrediction] = {}
+        self._missing_preview_warning_emitted = False
         super().__init__(**player_kwargs)
 
     def teampreview(self, battle: AbstractBattle) -> str:
@@ -453,9 +454,11 @@ class InteractionPlayer(Player):
             return self.random_teampreview(battle)
         if self.team_preview_policy == "learned":
             if self.runtime.preview_head is None:
-                self.logger.warning(
-                    "Checkpoint has no team-preview head; using submitted slot one"
-                )
+                if not self._missing_preview_warning_emitted:
+                    self.logger.warning(
+                        "Checkpoint has no team-preview head; using submitted slot one"
+                    )
+                    self._missing_preview_warning_emitted = True
                 return deterministic_teampreview(battle)
             row = live_preview_observation(battle)
             lead = self.runtime.predict_team_preview(row)

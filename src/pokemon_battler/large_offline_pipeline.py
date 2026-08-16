@@ -286,6 +286,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             manifest["phases"]["source_cleanup"] = _remove_streamed_selfplay_archives(
                 assets["selfplay"]
             )
+        manifest.pop("error", None)
         manifest["status"] = "complete"
         _write_manifest(run_manifest_path, manifest)
         print(json.dumps(manifest, indent=2, sort_keys=True))
