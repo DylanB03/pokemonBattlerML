@@ -220,6 +220,9 @@ for `.env` fields, commands, safeguards, artifacts, and ladder limitations.
 The documented bounded campaign mode can run ten 100-game learning batches,
 chain each promoted PPO model from its predecessor, stop early above a 50%
 batch score, and emit per-batch plus aggregate model-improvement reports.
+Frozen campaigns can also use multiple reporting batches and public battle
+concurrency without PPO; the public-learning guide contains the current v2
+five-by-100 command.
 
 ## Run the new interaction policy end to end
 

@@ -62,6 +62,27 @@ preview is randomized because the current 13-action policy begins after team
 preview and should not expose a permanent slot-one lead. Use
 `--team-preview first` only for a deliberately fixed-lead measurement.
 
+`--concurrent-games` controls the maximum number of public battles in flight
+for one logged-in player. Multiple frozen `--batches` are supported so a long
+evaluation can retain separate per-batch records without enabling PPO. For
+example, this runs five frozen 100-game suites with up to four simultaneous
+battles:
+
+```bash
+python -m pokemon_battler.public_play \
+  --mode ladder \
+  --checkpoint outputs/metamon-large-v2/04-candidate \
+  --games 100 \
+  --batches 5 \
+  --concurrent-games 4 \
+  --team-preview random \
+  --output-dir reports/public/metamon-large-v2-5x100
+```
+
+This command deliberately omits `--learn`: the structured sidecar has its own
+training objective and is rejected by the older statewise PPO updater. Each
+batch and the aggregate campaign still receive win/loss and ELO summaries.
+
 There is no wall-clock deadline on a battle session. A finite `--games` run
 waits until every requested game has ended before closing the connection, even
 when the run takes several hours. `--login-timeout` applies only while initially

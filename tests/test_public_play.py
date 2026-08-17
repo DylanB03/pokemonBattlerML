@@ -154,6 +154,72 @@ class PublicPlayTests(unittest.TestCase):
         )
         player.ladder.assert_awaited_once_with(50)
 
+    def test_frozen_campaign_supports_multiple_reported_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / ".env"
+            env_file.write_text(
+                f"{USERNAME_KEY}=FrozenBot\n{PASSWORD_KEY}=secret\n",
+                encoding="utf-8",
+            )
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            output_dir = root / "frozen-campaign"
+            args = build_parser().parse_args(
+                [
+                    "--env-file",
+                    str(env_file),
+                    "--mode",
+                    "ladder",
+                    "--games",
+                    "100",
+                    "--batches",
+                    "2",
+                    "--concurrent-games",
+                    "4",
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+            public_summary = {
+                "finished_games": 100,
+                "wins": 55,
+                "losses": 45,
+                "ties": 0,
+                "decisions": 200,
+                "fallbacks": 0,
+                "battles": [],
+                "rollout": {"pending_battles": 0, "decisions": 200},
+            }
+            with (
+                patch(
+                    "pokemon_battler.public_play._play_public_batch",
+                    new=AsyncMock(side_effect=[public_summary, public_summary]),
+                ) as play,
+                patch("pokemon_battler.public_play._release_models"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                summary = run(args)
+
+            self.assertEqual(play.await_count, 2)
+            self.assertEqual(summary["campaign"]["completed_batches"], 2)
+            self.assertEqual(summary["campaign"]["public"]["finished_games"], 200)
+            self.assertEqual(
+                summary["campaign"]["stop_reason"], "completed_requested_batches"
+            )
+            self.assertEqual(summary["selected_checkpoint"], str(checkpoint.resolve()))
+            self.assertFalse(summary["learning_enabled"])
+
+    def test_public_concurrency_must_be_positive(self) -> None:
+        args = build_parser().parse_args(
+            ["--mode", "ladder", "--concurrent-games", "0"]
+        )
+        args.sample_actions = False
+        with self.assertRaisesRegex(ValueError, "concurrent-games"):
+            _validate_args(args, None)
+
     def test_public_summary_does_not_count_an_active_battle_as_a_tie(self) -> None:
         finished_win = SimpleNamespace(
             battle_tag="battle-win",

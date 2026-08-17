@@ -585,7 +585,7 @@ async def _play_public_batch(
         sampling_temperature=args.sampling_temperature,
         team_preview_policy=args.team_preview,
         battle_format=args.battle_format,
-        max_concurrent_battles=1,
+        max_concurrent_battles=args.concurrent_games,
         save_replays=str(output_dir / "replays"),
         server_configuration=ShowdownServerConfiguration,
         start_timer_on_battle_start=args.start_timer,
@@ -670,14 +670,14 @@ async def _probe_public_login(
 def _validate_args(args: argparse.Namespace, opponent: str | None) -> None:
     if args.games <= 0 or args.batches <= 0:
         raise ValueError("--games and --batches must be positive")
+    if args.concurrent_games <= 0:
+        raise ValueError("--concurrent-games must be positive")
     if args.mode in {"accept", "challenge"} and not opponent:
         raise ValueError(
             f"--mode {args.mode} requires --opponent or {OPPONENT_KEY} in .env"
         )
     if args.mode == "login" and args.learn:
         raise ValueError("--learn cannot be used with --mode login")
-    if args.batches > 1 and not args.learn:
-        raise ValueError("Multiple --batches require --learn")
     if args.stop_win_rate is not None:
         if not args.learn:
             raise ValueError("--stop-win-rate requires --learn")
