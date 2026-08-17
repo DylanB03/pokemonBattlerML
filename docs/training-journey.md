@@ -3,9 +3,10 @@
 *The model's mediocre results forced me to rethink the loss, the action
 representation, and what I was willing to call a result.*
 
-*Status: August 2026. The best selected checkpoint is still the public-PPO
-`batch-005` candidate. Five hundred public games and three later training
-approaches have not shown that it can reach a positive ladder win rate.*
+*Status: August 2026. The strongest measured checkpoint is now the second
+Metamon sidecar, `outputs/metamon-large-v2/04-candidate`. Its first frozen
+100-game public ladder run finished 53-47, the first positive public result in
+the project.*
 
 The unfine-tuned model's first answer to a battle prompt looked like this:
 
@@ -633,20 +634,20 @@ the state better, but it would still inherit sparse rewards, biased data, and
 weak evaluation. More parameters alone would make the same experiment slower,
 not make its target correct.
 
-## What I can conclude, and what I cannot
+## What I could conclude before the large offline run
 
-I can conclude that this training recipe has not produced a positive-win-rate
-ladder policy. The 500-game record is far enough below 50% that this is not a
-close miss. I can also conclude that the later teacher, trajectory, and
-residual runs did not beat the selected public checkpoint under their own
-promotion rules.
+At this point, I could conclude that the training recipe had not produced a
+positive-win-rate ladder policy. The 500-game record was far enough below 50%
+that it was not a close miss. The later teacher, trajectory, and residual runs
+also failed to beat the selected public checkpoint under their own promotion
+rules.
 
-I cannot conclude that 35.6% is the exact strength of every checkpoint. Two
+I could not conclude that 35.6% was the exact strength of every checkpoint. Two
 runs of the same checkpoint differed by seven to ten points, and `batch-005`
-has no public batch. I also cannot say the 0.5B base model is the sole cause.
-The strongest measured gain came from better inputs, while the strongest
-measured failures came from objectives and gates that did not match deployed
-play.
+had no public batch. I also could not say the 0.5B base model was the sole
+cause. The strongest measured gain had come from better inputs, while the
+strongest measured failures came from objectives and gates that did not match
+deployed play.
 
 Offline action accuracy is not a scaled version of win rate. A 44% policy is
 not “close” to a published agent with a 49% battle win rate. Accuracy compares
@@ -709,9 +710,9 @@ leaves the student trying to discover long-horizon Pokémon strategy from sparse
 actions and a few hundred wins. The results give me no reason to expect that to
 work.
 
-## The checkpoint I would test now
+## The checkpoint I would have tested next
 
-The best-supported checkpoint currently available is:
+The best-supported checkpoint available at that point was:
 
 ```text
 outputs/public-learning/positive-winrate-1000/batch-005/candidate
@@ -846,3 +847,128 @@ own biases. A local Foul Play win is not a public ladder result. But another
 failure would now eliminate a real hypothesis: that the project was mostly
 starved for broad offline experience. That is more useful than watching a fifth
 loss curve settle at a slightly different number on the same data.
+
+## The larger dataset finally changed battle performance
+
+The first Metamon run retained about 35,000 trajectories and 1.27 million
+decisions from the official self-play archives. That was a different scale from
+the 1,000-battle Foul Play collection and the 100-game public PPO batches. It
+also covered far more teams and positions.
+
+I kept Qwen as the base policy and trained a structured sidecar beside it. The
+base policy supplied its legal-action distribution. The sidecar scored the same
+actions from the numeric mechanics, categorical identities, stable rosters,
+and recent history that I had built earlier. Their legal log probabilities were
+blended at deployment. Qwen still contributed its learned policy; the new head
+could learn broad battle interactions without another language-model forward
+pass for every training row.
+
+The training target also used more than the recorded move. Both winning and
+losing trajectories stayed in the data. An action-value head learned the final
+battle outcome, a state-value head learned an expectile target, and
+advantage-weighted cloning changed how strongly the actor copied each recorded
+decision. The labels still could not reveal the outcome of actions that were
+never played, but a loss no longer disappeared from training and a win no
+longer made every action equally convincing.
+
+The interaction cache made this practical on my hardware. It stored the
+prepared mechanics tensors, identities, actions, outcomes, and row offsets in a
+form the sidecar could read directly. Later epochs did not have to parse more
+than a million JSON rows again, and the frozen Qwen checkpoint did not have to
+be loaded during sidecar training.
+
+On the first 100-game held-out Foul Play schedule, the Metamon v1 policy went
+48-52. The old champion went 30-70 on the same schedule. An 18-point change in
+the point estimate was the first local result large enough to justify extending
+a policy instead of starting another architecture from scratch.
+
+## The second policy continued the first one
+
+The v2 run sampled the next non-overlapping 0.5% slice of the archives. It added
+34,735 trajectories and 1,259,031 transitions, including 1,131,511 training
+transitions. More importantly, it loaded the v1 structured head and continued
+training it. Earlier experiments had sometimes restarted a candidate or
+reinitialized the head I meant to improve. This run verified that continuation
+before training began.
+
+I mixed 377,170 examples from v1 back into each epoch, exactly 25% of the
+combined training set. That rehearsal buffer protected the first policy's
+coverage while the second hash slice supplied new positions. I lowered the
+learning rate to `3e-5`, kept an epoch-zero rollback point, and trained for
+three epochs. Across validation, exact action accuracy rose from 60.94% to
+62.20%, switch accuracy rose from 50.36% to 52.83%, and loss fell from 1.5474
+to 1.4964. The change was modest, but it moved the difficult switch slice in
+the right direction without erasing v1.
+
+I then selected the Qwen-sidecar blend with battles instead of choosing it from
+the training loss. A sidecar weight of 0.75 won 30 of 50 validation games while
+v1 won 24. On a separate 200-game held-out schedule, v2 finished 109-91 and v1
+finished 96-104. That was a 54.5% result against 48.0%, a 6.5-point advantage.
+
+The automatic selection pointer still stayed on v1 because its paired
+bootstrap interval for the difference ran from -2.5 to 15 points. I had written
+the gate to require the whole interval to clear zero. That was a sensible rule
+for automatic promotion, but v2 now had the best point estimate in the blend
+sweep and the larger held-out test. I chose it for the public measurement while
+leaving the strict gate and its result intact.
+
+## The final public run finished 53-47
+
+I ran `outputs/metamon-large-v2/04-candidate` as a frozen greedy policy on the
+public Generation 9 OU ladder. There was no PPO update and no learning between
+games. Four battles ran concurrently, the submitted team stayed fixed, and the
+team-preview lead was randomized. The model completed all 100 rated battles
+against 88 different opponents.
+
+| Public result | Value |
+| --- | ---: |
+| Wins | 53 |
+| Losses | 47 |
+| Win rate | **53.0%** |
+| Decisions | 2,852 |
+| Policy fallbacks | 0 |
+| Mean battle length | 23.3 turns |
+| Mean policy latency | 0.167 seconds |
+
+The record was 36-32 after the first 68 games and 17-15 over the remaining 32.
+The result therefore survived the pause and completion of the same frozen run.
+It also cleared the best earlier public set, which had stopped at 40%, and the
+35.6% aggregate from the five-batch PPO campaign.
+
+The Showdown account `ATSskipper5` showed **1152 ELO** when I checked it after
+the experiment. That snapshot already included two later disconnect losses, so
+the rating at the exact end of the 53-47 set was somewhat higher. The client
+did not receive per-game rating updates during this run, which means I cannot
+recover the exact pre-disconnect number without inventing it. I treat 1152 as
+the conservative recorded account rating for the result.
+
+## What finally made the difference
+
+The 53% run came from the accumulated representation work and a much larger
+offline dataset. The mechanics and identity features solved collisions that
+the old numeric summary could never separate. Qwen remained useful as the base
+distribution, while the sidecar handled candidate-to-state interactions in a
+compact form. Blending the two preserved behavior the small language model had
+already learned and gave the structured policy enough weight to change actual
+decisions.
+
+Data coverage mattered more than another small hyperparameter change. The
+earlier teacher and PPO loops recycled hundreds of games across a narrow team
+pool. Metamon supplied more than a million decisions from tens of thousands of
+trajectories. Training on a second disjoint slice, continuing the learned head,
+and rehearsing v1 examples added coverage without throwing away the first
+gain.
+
+The evaluation process improved too. I stopped selecting checkpoints from loss
+alone. The blend sweep used held-out teams, the final comparison used another
+200-game schedule, and the public run froze the exact checkpoint under test.
+Zero fallbacks confirmed that the 53 wins came from the policy path rather than
+an emergency heuristic.
+
+This leaves `outputs/metamon-large-v2/04-candidate` as the strongest measured
+policy in the project. It is the first one to post a positive 100-game public
+record, and it reached that result without changing the 0.5B Qwen base model or
+using a battle-search engine at inference time. The route there was much less
+about finding a lucky learning rate than giving the model useful mechanics,
+enough varied experience, and a training process that actually continued the
+best thing I had already built.
