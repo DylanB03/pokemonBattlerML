@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 import warnings
@@ -18,6 +19,7 @@ from pokemon_battler.public_play import (
     _format_duration,
     _print_public_summary,
     _public_summary,
+    _public_summary_from_trace,
     _run_matchmaking,
     _validate_args,
     build_parser,
@@ -308,6 +310,173 @@ class PublicPlayTests(unittest.TestCase):
         self.assertEqual(summary["rating"]["peak_elo"], 1040)
         self.assertEqual(summary["rating"]["minimum_elo"], 1010)
         self.assertTrue(summary["rating"]["complete"])
+
+    def test_trace_summary_recovers_completed_games_and_policy_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "decisions.jsonl"
+            rows = [
+                {
+                    "event": "decision",
+                    "battle_id": "battle-one",
+                    "fallback_reason": None,
+                    "showdown_turn": 3,
+                    "prediction": {"latency_seconds": 0.1},
+                },
+                {
+                    "event": "decision",
+                    "battle_id": "battle-one",
+                    "fallback_reason": "test fallback",
+                    "showdown_turn": 4,
+                    "prediction": {"latency_seconds": 0.2},
+                },
+                {
+                    "event": "battle_finished",
+                    "battle_id": "battle-one",
+                    "won": True,
+                    "lost": False,
+                    "turns": 4,
+                    "opponent": "Opponent",
+                    "rating": 1100,
+                    "opponent_rating": 1110,
+                    "rating_update": {
+                        "before": 1100,
+                        "after": 1120,
+                        "change": 20,
+                        "result": "winning",
+                    },
+                },
+            ]
+            trace.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            args = build_parser().parse_args(
+                ["--mode", "ladder", "--games", "100", "--team-preview", "random"]
+            )
+            args.sample_actions = False
+            summary = _public_summary_from_trace(
+                args,
+                checkpoint=Path("checkpoint"),
+                account="PublicBot",
+                trace_path=trace,
+            )
+
+            self.assertEqual(summary["finished_games"], 1)
+            self.assertEqual(summary["wins"], 1)
+            self.assertEqual(summary["decisions"], 2)
+            self.assertEqual(summary["fallbacks"], 1)
+            self.assertEqual(summary["rating"]["net_change"], 20)
+            self.assertAlmostEqual(summary["inference_latency_seconds"]["mean"], 0.15)
+
+    def test_frozen_resume_finishes_partial_batch_then_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / ".env"
+            env_file.write_text(
+                f"{USERNAME_KEY}=ResumeBot\n{PASSWORD_KEY}=secret\n",
+                encoding="utf-8",
+            )
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            output_dir = root / "campaign"
+            public_dir = output_dir / "batch-001" / "public"
+            public_dir.mkdir(parents=True)
+            trace = public_dir / "decisions.jsonl"
+            trace.write_text(
+                json.dumps(
+                    {
+                        "event": "battle_finished",
+                        "battle_id": "prior-battle",
+                        "won": True,
+                        "lost": False,
+                        "turns": 8,
+                        "opponent": "PriorOpponent",
+                        "rating_update": None,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = build_parser().parse_args(
+                [
+                    "--env-file",
+                    str(env_file),
+                    "--mode",
+                    "ladder",
+                    "--games",
+                    "2",
+                    "--batches",
+                    "2",
+                    "--concurrent-games",
+                    "2",
+                    "--team-preview",
+                    "random",
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--output-dir",
+                    str(output_dir),
+                    "--resume",
+                ]
+            )
+            (output_dir / "run_config.json").write_text(
+                json.dumps(
+                    {
+                        "account": "ResumeBot",
+                        "mode": "ladder",
+                        "games": 2,
+                        "batches": 2,
+                        "battle_format": "gen9ou",
+                        "team_preview": "random",
+                        "learn": False,
+                        "initial_checkpoint": str(checkpoint.resolve()),
+                        "team_file": str(args.team_file),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            calls: list[int] = []
+
+            def fake_play(*_positional, **kwargs):
+                games = int(kwargs["games_to_play"])
+                calls.append(games)
+                destination = kwargs["output_dir"]
+                destination.mkdir(parents=True, exist_ok=True)
+                with (destination / "decisions.jsonl").open("a", encoding="utf-8") as stream:
+                    for index in range(games):
+                        stream.write(
+                            json.dumps(
+                                {
+                                    "event": "battle_finished",
+                                    "battle_id": f"session-{len(calls)}-{index}",
+                                    "won": False,
+                                    "lost": True,
+                                    "turns": 10,
+                                    "opponent": "NewOpponent",
+                                    "rating_update": None,
+                                }
+                            )
+                            + "\n"
+                        )
+                return {"rollout": {}}
+
+            with (
+                patch(
+                    "pokemon_battler.public_play._play_public_batch",
+                    new=AsyncMock(side_effect=fake_play),
+                ),
+                patch("pokemon_battler.public_play._release_models"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                summary = run(args)
+
+            self.assertEqual(calls, [1, 2])
+            self.assertEqual(summary["campaign"]["completed_batches"], 2)
+            self.assertEqual(summary["campaign"]["public"]["finished_games"], 4)
+            self.assertEqual(summary["batches"][0]["public"]["wins"], 1)
+            self.assertEqual(summary["batches"][0]["public"]["losses"], 1)
+            config = json.loads(
+                (output_dir / "run_config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(config["resume_count"], 1)
 
     def test_login_artifacts_never_contain_the_password(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

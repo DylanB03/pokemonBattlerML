@@ -222,7 +222,7 @@ chain each promoted PPO model from its predecessor, stop early above a 50%
 batch score, and emit per-batch plus aggregate model-improvement reports.
 Frozen campaigns can also use multiple reporting batches and public battle
 concurrency without PPO; the public-learning guide contains the current v2
-five-by-100 command.
+five-by-100 command and in-place recovery for an interrupted frozen batch.
 
 ## Run the new interaction policy end to end
 

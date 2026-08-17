@@ -333,6 +333,110 @@ def _public_summary(
     }
 
 
+def _public_summary_from_trace(
+    args: argparse.Namespace,
+    *,
+    checkpoint: Path,
+    account: str,
+    trace_path: Path,
+    rollout: Mapping[str, Any] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Rebuild a frozen public summary from its append-only decision trace."""
+    battles: dict[str, dict[str, Any]] = {}
+    decisions = 0
+    fallbacks = 0
+    latencies: list[float] = []
+    if trace_path.is_file():
+        with trace_path.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid JSON in {trace_path} at line {line_number}"
+                    ) from exc
+                battle_id = str(row.get("battle_id") or "")
+                if not battle_id:
+                    raise ValueError(
+                        f"Trace row {line_number} in {trace_path} has no battle_id"
+                    )
+                battle = battles.setdefault(
+                    battle_id,
+                    {
+                        "battle_id": battle_id,
+                        "finished": False,
+                        "won": None,
+                        "lost": None,
+                        "turns": None,
+                        "opponent": None,
+                        "rating": None,
+                        "opponent_rating": None,
+                        "rating_update": None,
+                    },
+                )
+                if row.get("event") == "decision":
+                    decisions += 1
+                    fallbacks += row.get("fallback_reason") is not None
+                    prediction = row.get("prediction") or {}
+                    latency = prediction.get("latency_seconds")
+                    if latency is not None:
+                        latencies.append(float(latency))
+                    turn = row.get("showdown_turn")
+                    if turn is not None:
+                        battle["turns"] = max(int(turn), int(battle["turns"] or 0))
+                elif row.get("event") == "battle_finished":
+                    battle.update(
+                        {
+                            "finished": True,
+                            "won": bool(row.get("won")),
+                            "lost": bool(row.get("lost")),
+                            "turns": row.get("turns"),
+                            "opponent": row.get("opponent"),
+                            "rating": row.get("rating"),
+                            "opponent_rating": row.get("opponent_rating"),
+                            "rating_update": row.get("rating_update"),
+                        }
+                    )
+    battle_results = list(battles.values())
+    finished_battles = [battle for battle in battle_results if battle["finished"]]
+    wins = sum(battle["won"] is True for battle in finished_battles)
+    losses = sum(battle["lost"] is True for battle in finished_battles)
+    ties = len(finished_battles) - wins - losses
+    return {
+        "schema": PUBLIC_SCHEMA,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "mode": args.mode,
+        "account": account,
+        "checkpoint": str(checkpoint),
+        "battle_format": args.battle_format,
+        "team_file": str(args.team_file),
+        "requested_games": args.games,
+        "started_games": len(battle_results),
+        "finished_games": len(finished_battles),
+        "unfinished_games": len(battle_results) - len(finished_battles),
+        "wins": wins,
+        "losses": losses,
+        "ties": ties,
+        "win_rate": wins / len(finished_battles) if finished_battles else None,
+        "win_rate_wilson_95": _wilson_interval(wins, len(finished_battles)),
+        "rating": _rating_summary(battle_results),
+        "decisions": decisions,
+        "fallbacks": fallbacks,
+        "fallback_rate": fallbacks / decisions if decisions else 0.0,
+        "sample_actions": args.sample_actions,
+        "sampling_temperature": args.sampling_temperature,
+        "team_preview_policy": args.team_preview,
+        "inference_latency_seconds": _latency_summary(latencies),
+        "rollout": dict(rollout or {}),
+        "error": error,
+        "recovered_from_trace": True,
+        "battles": battle_results,
+    }
+
+
 def _print_public_summary(summary: Mapping[str, Any]) -> None:
     finished = int(summary["finished_games"])
     requested = int(summary["requested_games"])
@@ -545,10 +649,26 @@ async def _play_public_batch(
     opponent: str | None,
     checkpoint: Path,
     output_dir: Path,
+    games_to_play: int | None = None,
+    resume_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    output_dir.mkdir(parents=True, exist_ok=False)
+    continuing = resume_summary is not None
+    output_dir.mkdir(parents=True, exist_ok=continuing)
     buffer = WinTrajectoryBuffer(gamma=args.gamma, gae_lambda=args.gae_lambda)
     progress = PublicBattleProgress(args.games)
+    if resume_summary is not None:
+        progress.completed_games = int(resume_summary["finished_games"])
+        progress.wins = int(resume_summary["wins"])
+        progress.losses = int(resume_summary["losses"])
+        progress.ties = int(resume_summary["ties"])
+        progress.seen_battle_ids = {
+            str(battle["battle_id"])
+            for battle in resume_summary.get("battles", [])
+            if battle.get("finished")
+        }
+    session_games = args.games if games_to_play is None else games_to_play
+    if session_games <= 0:
+        raise ValueError("games_to_play must be positive")
 
     def receive(event: dict[str, Any]) -> None:
         if event["event"] == "decision":
@@ -591,22 +711,23 @@ async def _play_public_batch(
         start_timer_on_battle_start=args.start_timer,
         team=_read_team(args.team_file),
     )
-    session_error: Exception | None = None
+    session_error: BaseException | None = None
     close_error: Exception | None = None
     try:
         await _wait_for_login(player, args.login_timeout)
         print(
             f"[public] logged in as {player.username} | mode {args.mode} | "
-            f"games {args.games}",
+            f"games this session {session_games} | batch progress "
+            f"{progress.completed_games}/{args.games}",
             flush=True,
         )
         await _run_matchmaking(
             player,
             mode=args.mode,
             opponent=opponent,
-            games=args.games,
+            games=session_games,
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         session_error = exc
     finally:
         rollout = buffer.write_jsonl(output_dir / "rollouts.jsonl")
@@ -678,6 +799,10 @@ def _validate_args(args: argparse.Namespace, opponent: str | None) -> None:
         )
     if args.mode == "login" and args.learn:
         raise ValueError("--learn cannot be used with --mode login")
+    if args.resume and args.output_dir is None:
+        raise ValueError("--resume requires an explicit --output-dir")
+    if args.resume and (args.learn or args.mode == "login"):
+        raise ValueError("--resume currently supports frozen public campaigns only")
     if args.stop_win_rate is not None:
         if not args.learn:
             raise ValueError("--stop-win-rate requires --learn")
@@ -734,6 +859,41 @@ def _promotion_args(args: argparse.Namespace) -> SimpleNamespace:
     )
 
 
+def _validate_resume_configuration(
+    args: argparse.Namespace,
+    existing: Mapping[str, Any],
+    *,
+    checkpoint: Path,
+    account: str,
+) -> None:
+    expected = {
+        "mode": args.mode,
+        "games": args.games,
+        "batches": args.batches,
+        "battle_format": args.battle_format,
+        "team_preview": args.team_preview,
+        "learn": False,
+        "account": account,
+    }
+    mismatches = {
+        key: (existing.get(key), value)
+        for key, value in expected.items()
+        if existing.get(key) != value
+    }
+    prior_checkpoint = existing.get("initial_checkpoint")
+    if prior_checkpoint is None or Path(str(prior_checkpoint)).resolve() != checkpoint.resolve():
+        mismatches["initial_checkpoint"] = (prior_checkpoint, str(checkpoint.resolve()))
+    prior_team = Path(str(existing.get("team_file", "")))
+    if prior_team.resolve() != args.team_file.resolve():
+        mismatches["team_file"] = (str(prior_team), str(args.team_file))
+    if mismatches:
+        details = ", ".join(
+            f"{key}: prior={prior!r}, requested={requested!r}"
+            for key, (prior, requested) in sorted(mismatches.items())
+        )
+        raise ValueError(f"Resume arguments do not match the existing campaign: {details}")
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     public_environment = load_public_environment(args.env_file)
     opponent = args.opponent or public_environment.opponent
@@ -747,23 +907,44 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     default_root = Path("outputs/public-learning" if args.learn else "reports/public")
     output_dir = args.output_dir or default_root / timestamp
-    if output_dir.exists() and any(output_dir.iterdir()):
+    output_has_files = output_dir.exists() and any(output_dir.iterdir())
+    if output_has_files and not args.resume:
         raise FileExistsError(
             f"Public output directory is not empty: {output_dir}. Use a new directory "
             "so checkpoints and traces are never overwritten."
         )
+    if args.resume and not output_has_files:
+        raise FileNotFoundError(
+            f"Resume output directory has no existing campaign: {output_dir}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = {
-        key: _serialize(value)
-        for key, value in vars(args).items()
-        if key not in {"password"}
-    } | {
-        "account": public_environment.account.username,
-        "opponent": opponent,
-        "initial_checkpoint": str(checkpoint) if checkpoint is not None else None,
-        "credential_source": str(args.env_file),
-    }
-    (output_dir / "run_config.json").write_text(
+    config_path = output_dir / "run_config.json"
+    if args.resume:
+        if not config_path.is_file():
+            raise FileNotFoundError(f"Resume campaign has no run_config.json: {output_dir}")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert checkpoint is not None
+        _validate_resume_configuration(
+            args,
+            config,
+            checkpoint=checkpoint,
+            account=public_environment.account.username,
+        )
+        config["resume_count"] = int(config.get("resume_count", 0)) + 1
+        config["last_resumed_at"] = datetime.now(timezone.utc).isoformat()
+        config["concurrent_games"] = args.concurrent_games
+    else:
+        config = {
+            key: _serialize(value)
+            for key, value in vars(args).items()
+            if key not in {"password"}
+        } | {
+            "account": public_environment.account.username,
+            "opponent": opponent,
+            "initial_checkpoint": str(checkpoint) if checkpoint is not None else None,
+            "credential_source": str(args.env_file),
+        }
+    config_path.write_text(
         json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
@@ -809,25 +990,87 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     initial_checkpoint = checkpoint
     champion_checkpoint = checkpoint
     batches: list[dict[str, Any]] = []
-    stop_reason = "in_progress"
+    if args.resume:
+        for prior_batch_number in range(1, args.batches + 1):
+            prior_path = (
+                output_dir
+                / f"batch-{prior_batch_number:03d}"
+                / "batch_summary.json"
+            )
+            if not prior_path.is_file():
+                break
+            batches.append(json.loads(prior_path.read_text(encoding="utf-8")))
+    stop_reason = (
+        "completed_requested_batches"
+        if len(batches) == args.batches
+        else "in_progress"
+    )
+    campaign = _campaign_summary(
+        args,
+        batches,
+        initial_checkpoint=initial_checkpoint,
+        selected_checkpoint=champion_checkpoint,
+        stop_reason=stop_reason,
+    )
     for batch_number in range(1, args.batches + 1):
+        if batch_number <= len(batches):
+            continue
         batch_dir = output_dir / f"batch-{batch_number:03d}"
-        batch_dir.mkdir(parents=True, exist_ok=False)
+        batch_dir.mkdir(parents=True, exist_ok=args.resume)
         source_checkpoint = champion_checkpoint.resolve()
+        public_dir = batch_dir / "public"
+        trace_path = public_dir / "decisions.jsonl"
+        prior_public: dict[str, Any] | None = None
+        if args.resume and trace_path.is_file():
+            prior_public = _public_summary_from_trace(
+                args,
+                checkpoint=source_checkpoint,
+                account=public_environment.account.username,
+                trace_path=trace_path,
+            )
+        finished_before = int(prior_public["finished_games"]) if prior_public else 0
+        if finished_before > args.games:
+            raise ValueError(
+                f"Batch {batch_number} trace contains {finished_before} completed games, "
+                f"more than the configured {args.games}"
+            )
+        games_remaining = args.games - finished_before
         print(
-            f"[batch {batch_number}/{args.batches}] starting public games | "
+            f"[batch {batch_number}/{args.batches}] "
+            f"{'resuming' if finished_before else 'starting'} public games | "
+            f"progress {finished_before}/{args.games} | remaining {games_remaining} | "
             f"checkpoint {source_checkpoint}",
             flush=True,
         )
-        public_summary = asyncio.run(
-            _play_public_batch(
-                args,
-                account=public_environment.account,
-                opponent=opponent,
-                checkpoint=source_checkpoint,
-                output_dir=batch_dir / "public",
+        session_summary: dict[str, Any] | None = None
+        if games_remaining:
+            session_summary = asyncio.run(
+                _play_public_batch(
+                    args,
+                    account=public_environment.account,
+                    opponent=opponent,
+                    checkpoint=source_checkpoint,
+                    output_dir=public_dir,
+                    games_to_play=games_remaining,
+                    resume_summary=prior_public,
+                )
             )
-        )
+        if args.resume:
+            public_summary = _public_summary_from_trace(
+                args,
+                checkpoint=source_checkpoint,
+                account=public_environment.account.username,
+                trace_path=trace_path,
+                rollout=(session_summary or {}).get("rollout"),
+            )
+            (public_dir / "public_summary.json").write_text(
+                json.dumps(public_summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            _print_public_summary(public_summary)
+        else:
+            assert session_summary is not None
+            public_summary = session_summary
         public_score = _result_score(public_summary)
         previous_score = (
             _result_score(batches[-1]["public"]) if batches else None
@@ -1045,6 +1288,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--team-file", type=Path, default=DEFAULT_TEAM)
     parser.add_argument("--battle-format", default="gen9ou")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted frozen campaign from its append-only trace.",
+    )
     parser.add_argument(
         "--team-preview", choices=("learned", "first", "random"), default="learned"
     )

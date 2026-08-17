@@ -83,6 +83,30 @@ This command deliberately omits `--learn`: the structured sidecar has its own
 training objective and is rejected by the older statewise PPO updater. Each
 batch and the aggregate campaign still receive win/loss and ELO summaries.
 
+If a frozen campaign is interrupted between battles, rerun the identical
+command with `--resume`. The runner rebuilds the current batch from its
+append-only `decisions.jsonl`, requests only the unfinished game count, and
+then continues later batches. It rejects checkpoint, account, batch-size,
+format, team, or preview-policy mismatches instead of combining different
+experiments. For the campaign above:
+
+```bash
+python -m pokemon_battler.public_play \
+  --mode ladder \
+  --checkpoint outputs/metamon-large-v2/04-candidate \
+  --games 100 \
+  --batches 5 \
+  --concurrent-games 4 \
+  --team-preview random \
+  --output-dir reports/public/metamon-large-v2-5x100 \
+  --resume
+```
+
+Completed battle records, decisions, replay files, fallbacks, inference
+latencies, and captured ELO transitions remain in the same batch summary.
+Resume is intentionally limited to frozen campaigns because PPO requires one
+complete on-policy rollout batch.
+
 There is no wall-clock deadline on a battle session. A finite `--games` run
 waits until every requested game has ended before closing the connection, even
 when the run takes several hours. `--login-timeout` applies only while initially
