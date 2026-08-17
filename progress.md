@@ -1,4 +1,9 @@
-# initial pre training
+# Project progress
+
+This is my running record of the training changes, completed experiments, and
+results behind the repository.
+
+## Initial pretrained output
 
 ```
 {"id":"cmpl-9523f9b435e598f7","object":"text_completion","created":1784847078,"model":"Qwen/Qwen2.5-0.5B","choices":[{"index":0,
@@ -69,10 +74,10 @@ roughly the 1.60-1.75 band. Because 5,000 updates cover about 56% of the
 5,000-row final evaluation. It is the reference the next representation must
 beat.
 
-Next experiment:
+The next experiment I ran was:
 
 ```bash
-.venv/bin/python -m pokemon_battler.experiment \
+python -m pokemon_battler.experiment \
   --output-dir outputs/mechanics-v2-1epoch
 ```
 
@@ -112,11 +117,11 @@ preparer can derive history events and stable revealed rosters by walking only
 states at or before that decision. The legacy prepared JSONL discarded the
 accumulated context; the source archive did not.
 
-The proposed schema is documented in
+I documented the schema in
 [docs/interaction-policy-v3.md](docs/interaction-policy-v3.md). It fixes the
 prepared-row version, cache arrays, 30-token structured layout, four-layer
 interaction encoder, legal hierarchy, optional value loss, Qwen ablations, and
-acceptance tests before implementation begins.
+acceptance tests that governed the implementation.
 
 ## Direct win-optimization pipeline
 
@@ -187,3 +192,25 @@ chain. Per-batch JSON records and a continuously refreshed campaign summary
 report aggregate public results, observed rating movement, PPO updates,
 candidate promotions, checkpoint lineage, and whether the final selected model
 has itself been tested in a later public batch.
+
+## Large Metamon sidecar and positive public result
+
+The first 0.5% Metamon run changed the scale of the project from a few hundred
+teacher games to 34,524 trajectories and 1,249,105 decisions. I kept Qwen as
+the base legal-action policy and trained a structured sidecar from mechanics,
+identities, rosters, and recent history. On the paired 100-game Foul Play
+schedule, that v1 policy finished 48-52 while the previous champion finished
+30-70.
+
+I continued the trained sidecar on a disjoint second 0.5% archive slice instead
+of reinitializing it. The v2 run added 34,735 trajectories and 1,259,031
+transitions, mixed in 25% v1 rehearsal examples, and selected a 0.75 sidecar
+blend through validation battles. On the separate 200-game held-out schedule,
+v2 finished 109-91 while v1 finished 96-104.
+
+I then froze `outputs/metamon-large-v2/04-candidate` and used it for 100 public
+Generation 9 OU ladder games. The final result was **53 wins and 47 losses**.
+The run made 2,852 policy decisions with zero fallbacks. The `ATSskipper5`
+account showed **1152 ELO** when I checked it afterward; that snapshot already
+included two later disconnect losses, so the rating at the exact end of the
+53-47 set was somewhat higher.

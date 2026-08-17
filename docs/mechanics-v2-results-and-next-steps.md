@@ -1,6 +1,6 @@
-# What mechanics-v2 proved, and what should change next
+# What mechanics-v2 taught me, and what I changed next
 
-The mechanics-v2 run was a real improvement, but it also made the current
+I got a real improvement from mechanics-v2, and the run also made the current
 ceiling easier to see. The selected `final/` checkpoint reached 2,143 correct
 decisions out of 5,000 validation rows: 42.86% top-1 action agreement. Top-2
 was 64.78%, top-3 was 78.78%, and mean reciprocal rank was 0.6265. On the fixed
@@ -8,17 +8,17 @@ was 64.78%, top-3 was 78.78%, and mean reciprocal rank was 0.6265. On the fixed
 41.8945%, compared with 36.5234% for the earlier candidate-head run. That is a
 5.37-point gain with the same Qwen2.5-0.5B base model.
 
-The gain matters. It shows that the previous 36% result was not simply the
-inevitable limit of a 0.5B model. Better candidate information and fewer
-representation collisions produced substantially better decisions without a
-larger language model.
+That gain showed me that the previous 36% result was not the inevitable limit
+of a 0.5B model. Better candidate information and fewer representation
+collisions produced substantially better decisions without a larger language
+model.
 
-It is still entirely possible that 0.5B parameters and rank-16 LoRA impose a
-capacity ceiling. Long-horizon planning, hidden-set inference, and unusual
-interactions are difficult tasks. The completed experiment does not isolate
-that ceiling, though, because the data, scorer, and training target still leave
-important performance on the table. I would not pay for a larger model until
-those limitations have been tested.
+I still thought 0.5B parameters and rank-16 LoRA might impose a capacity
+ceiling. Long-horizon planning, hidden-set inference, and unusual
+interactions are difficult tasks. The completed experiment did not isolate
+that ceiling because the data, scorer, and training target still left important
+performance on the table. I decided not to pay for a larger model until I had
+tested those limitations.
 
 ## What the result actually says
 
@@ -47,11 +47,11 @@ decline. More updates to the same system would probably make its probability
 ranking a little smoother; there is no evidence that another epoch would
 produce a comparable jump in exact decisions.
 
-## A data problem discovered after the run
+## The data problem I found after the run
 
-The completed run used the existing `data/gen9ou-dev` files, which predate the
-current preparation schema. A full scan found that all 286,059 training rows,
-all 28,556 validation rows, and all 11,662 test rows lack:
+I found that the completed run used the existing `data/gen9ou-dev` files, which
+predate the current preparation schema. A full scan found that all 286,059
+training rows, all 28,556 validation rows, and all 11,662 test rows lack:
 
 - `schema_version: 2`;
 - four-turn `recent_move_history`;
@@ -65,10 +65,9 @@ reconstruct prior opponent reveals or four-turn history from an isolated row.
 It also cannot tell evaluation apart by exact, PP-aware, and merely recoverable
 legal masks.
 
-This does not invalidate the 42.86% result. It means the next long run should
-not reuse this prepared dataset. The current preparer already implements the
-missing fields, so the first next experiment is a data rebuild into a new
-directory:
+I still count the 42.86% result, but I could not reuse this prepared dataset for
+the next long run. The current preparer already implements the missing fields,
+so I rebuilt the data in a new directory before the next long run:
 
 ```bash
 pokemon-prepare \
@@ -88,7 +87,7 @@ Keeping a new directory preserves the old rows, caches, and checkpoint. The
 deterministic split and sample settings also make the new result as comparable
 as the source archive permits.
 
-## The serious performance changes
+## The performance changes I chose
 
 These are ordered by how directly they address a measured limitation, not by
 how novel they sound.
@@ -100,8 +99,8 @@ agreement. This isolates wiring, optimization, LoRA, and scorer capacity from
 generalization. If the exact architecture cannot nearly memorize 128 rows,
 more data and more epochs are the wrong response.
 
-The existing memorization gate predates the final v2 representation, so it
-should be repeated for this actual input and head.
+The existing memorization gate predates the final v2 representation, so I
+needed to repeat it for this actual input and head.
 
 After preparing `data/gen9ou-dev-schema2`, the exact gate is:
 
@@ -171,8 +170,8 @@ cannot learn an explicit interaction such as “this switch is worthwhile only
 because every attack is worse,” or reason jointly over the full team and all
 candidate actions.
 
-The next head should represent team members and legal candidates as a small set
-of tokens, then use two to four lightweight self-attention/cross-attention
+I decided that the next head needed to represent team members and legal
+candidates as a small set of tokens, then use two to four lightweight attention
 layers before producing masked logits. A global token can retain the Qwen state
 vector initially. This is the kind of interaction that a Set Transformer is
 designed to model; its original paper describes attention over set elements
@@ -277,9 +276,9 @@ the structured model beats the hybrid, the current language representation is
 the bottleneck. If Qwen helps but both plateau after the data and objective are
 fixed, 0.5B capacity becomes the strongest explanation.
 
-## Recommended order
+## The order I chose
 
-The next work should be staged so each expensive run answers one question:
+I staged the next work so each expensive run answered one question:
 
 1. Preserve the current checkpoint and reports.
 2. Regenerate the 2% dataset with schema 2.
@@ -290,7 +289,7 @@ The next work should be staged so each expensive run answers one question:
 7. Connect a fixed-team simulator benchmark and add shallow search.
 8. Distill search values into the small policy.
 
-I would not spend another 20-hour run on learning-rate changes, a longer copy of
-the same epoch, RAG prose, or a blind model upgrade. The current result is good
-enough to justify the project, but not good enough to justify leaving the data,
+I decided not to spend another 20-hour run on learning-rate changes, a longer
+copy of the same epoch, RAG prose, or a blind model upgrade. The result was good
+enough to justify the project, but not good enough to leave the data,
 independent scorer, and imitation-only objective unchanged.

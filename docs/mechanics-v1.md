@@ -98,7 +98,7 @@ changing its timestamp.
 
 ## Experiments this enables
 
-The recommended hybrid run is:
+The reference hybrid run is:
 
 ```bash
 python -m pokemon_battler.experiment \

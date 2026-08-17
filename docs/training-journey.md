@@ -459,7 +459,7 @@ then, buying more parameters would hide the diagnosis.
 
 The concrete experiment order and the comparison with published Pokémon agents
 are in
-[What mechanics-v2 proved, and what should change next](mechanics-v2-results-and-next-steps.md).
+[What mechanics-v2 taught me, and what I changed next](mechanics-v2-results-and-next-steps.md).
 
 ## I built the next experiment as one pipeline
 

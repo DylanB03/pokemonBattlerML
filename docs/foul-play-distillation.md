@@ -138,7 +138,7 @@ find reports/teacher -name foul_play_teacher.jsonl -print0 \
 
 ```bash
 python -m pokemon_battler.distill \
-  --checkpoint outputs/your-current-checkpoint \
+  --checkpoint outputs/source-checkpoint \
   --teacher-data data/foul_play_teacher.jsonl \
   --output-dir outputs/foul-play-distilled-001 \
   --epochs 3 \
@@ -196,14 +196,14 @@ remain Foul Play's full search targets. Later rounds aggregate all new traces so
 they expand the visited-state distribution instead of repeatedly fitting one
 small batch.
 
-## Recommended gated command
+## Current gated command
 
 The cumulative multi-round command below is now a legacy reproduction path.
 The first completed round took about 22 hours because frozen Qwen was evaluated
 again for every epoch and every rehearsal batch. Its candidate moved toward the
 teacher offline but did not produce a statistically useful battle improvement.
 
-The recommended command reuses the two completed teacher collections, isolates
+The current command reuses the two completed teacher collections, isolates
 inference ablations, caches frozen Qwen once, trains bounded head variants, and
 stops when an offline gate fails:
 

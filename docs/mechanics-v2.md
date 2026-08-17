@@ -5,7 +5,7 @@ validation rows. On the fixed 1,024-row training-validation check, it reached
 41.89% compared with the earlier candidate-head reference of 36.52%. The run
 also exposed an outdated prepared dataset and limits in the independent
 candidate scorer. See
-[What mechanics-v2 proved, and what should change next](mechanics-v2-results-and-next-steps.md)
+[What mechanics-v2 taught me, and what I changed next](mechanics-v2-results-and-next-steps.md)
 before starting another full run.
 
 ## Why v1 was replaced
@@ -168,4 +168,4 @@ pokemon-mechanics-baseline train \
 ```
 
 That comparison tests whether Qwen contributes useful strategic state context.
-It does not change the recommended hybrid architecture.
+It does not change the current hybrid architecture.

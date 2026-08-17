@@ -117,6 +117,21 @@ then evaluates candidate and champion on a separate test-team schedule. A
 strict `--minimum-delta-interval-lower 0` requires the paired interval's lower
 bound to be positive before promotion.
 
+## Completed v2 result
+
+I ran the continuation on the disjoint `[0.005, 0.010)` hash window. It retained
+34,735 trajectories and 1,259,031 transitions, mixed 377,170 v1 rehearsal
+examples into each epoch, and selected a sidecar blend weight of 0.75. On the
+separate 200-game held-out schedule, v2 finished 109-91 while v1 finished
+96-104.
+
+The automatic pointer remained on v1 because the paired interval for the
+difference crossed zero. I kept that strict gate intact and used v2 as the next
+public candidate because it had the stronger point estimate in both battle
+stages. The frozen public run finished 53-47 over 100 Generation 9 OU ladder
+games with zero fallbacks across 2,852 decisions. The strongest measured
+checkpoint is `outputs/metamon-large-v2/04-candidate`.
+
 ## Where four-way parallelism is useful
 
 The default `--workers 4` is used in four CPU-bound places:

@@ -23,7 +23,7 @@ Fill in the registered bot account:
 
 ```dotenv
 POKEMON_SHOWDOWN_USERNAME=YourClearlyNamedBot
-POKEMON_SHOWDOWN_PASSWORD="your password"
+POKEMON_SHOWDOWN_PASSWORD="replace-me"
 
 # Optional; --opponent overrides this value.
 POKEMON_SHOWDOWN_OPPONENT=YourTestingAccount
@@ -42,7 +42,7 @@ python -m pokemon_battler.public_play --mode login
 
 ## Play frozen-policy games first
 
-The recommended first real games are unrated challenges from one named testing
+The first real games use unrated challenges from one named testing
 account. Start the bot with:
 
 ```bash
@@ -101,6 +101,12 @@ python -m pokemon_battler.public_play \
   --output-dir reports/public/metamon-large-v2-5x100 \
   --resume
 ```
+
+I completed the first 100-game batch with the frozen Metamon v2 checkpoint. It
+finished **53-47** against 88 public opponents, made 2,852 policy decisions,
+and used no fallback actions. The `ATSskipper5` account showed **1152 ELO** when
+I checked it afterward. That account snapshot included two later disconnect
+losses, so the exact rating at the end of game 100 was somewhat higher.
 
 Completed battle records, decisions, replay files, fallbacks, inference
 latencies, and captured ELO transitions remain in the same batch summary.

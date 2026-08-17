@@ -1,9 +1,9 @@
 # Pokémon Battler Roadmap
 
-## Vision
+## My goal
 
-Build a competitive Qwen Pokémon policy whose primary objective is match win
-rate. The policy should:
+My goal is to build a competitive Qwen Pokémon policy whose primary objective
+is match win rate. The policy should:
 
 1. Play complete Pokémon Showdown battles as a disclosed bot or practice
    opponent.
@@ -111,13 +111,16 @@ Implemented:
   memoryless/recurrent candidate-policy comparison.
 - Two-critic next-state IQL with recurrent burn-in, per-battle live GRU state,
   duplicate-request protection, and paired complete-game selection.
+- A public Showdown runner with `.env` account loading, challenge and ladder
+  modes, concurrent frozen battles, resumable reports, and optional
+  between-batch PPO.
+- A completed frozen 100-game public run for the Metamon v2 checkpoint: 53 wins,
+  47 losses, and zero fallbacks across 2,852 decisions.
 
 Not yet implemented:
 
 - Probability calibration and a user-facing preference display. Live traces
   already record normalized legal-action preferences.
-- Public-server account and ladder mode. The local client isolates this to
-  connection configuration and matchmaking after local validation.
 - A replay-review interface.
 - Calibration evidence for the new state/action values across a broad team and
   opponent distribution. The estimators now exist but are not calibrated by
@@ -131,7 +134,8 @@ Not yet implemented:
 
 ## Phase 0.5 — Optimize complete-game wins
 
-Status: implemented and awaiting the first GPU pilot.
+Status: implemented and evaluated. The later large-data sidecar is now the
+strongest measured policy.
 
 The `pokemon_battler.win_experiment` runner uses the selected behavior-cloning
 checkpoint as a warm start, learns outcome-conditioned action and state values,
@@ -140,10 +144,10 @@ against the current champion. The only environmental reward is the final
 win/loss result. Search policies and mechanics engines are not in the training
 or inference path.
 
-The first run must establish whether promotion win rate improves while action
-legality remains perfect. If it does, scale the opponent/team population and
-promotion sample before changing the Qwen size. The exact command, artifacts,
-and limits are documented in
+The first run tested whether promotion win rate improved while action legality
+remained perfect. Later scaling work moved to broader opponent and team
+populations before considering a Qwen size change. The exact command,
+artifacts, and limits are documented in
 [Training Qwen for battle wins](docs/qwen-win-training.md).
 
 ## Phase 0 — Validate the behavior-cloned policy
@@ -184,8 +188,8 @@ Exit criteria:
 - It always selects a legal action.
 - Battle evaluation is reproducible and reported with confidence intervals.
 
-The rationale and recommended experiment order are documented in
-[What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
+The rationale and experiment order are documented in
+[What mechanics-v2 taught me, and what I changed next](docs/mechanics-v2-results-and-next-steps.md).
 The implementation contract is
 [Interaction policy v3](docs/interaction-policy-v3.md).
 
@@ -328,7 +332,7 @@ Exit criteria:
 - Counterfactual estimates outperform policy preference alone at predicting
   simulated and held-out battle outcomes.
 - Near-tied actions are not systematically overgraded.
-- Results are robust enough to changes in sampled hidden information and
+- Results remain stable under changes in sampled hidden information and
   opponent policy.
 
 ## Phase 6 — Separate decision quality from luck

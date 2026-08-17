@@ -3,7 +3,7 @@
 > Completed result: this architecture did not beat the batch-005 champion. The
 > recurrent head scored 16/100 against the memoryless head's 22/100, and the
 > memoryless head scored 20/100 against the champion's 21/100. It remains here
-> for reproducibility, but the recommended next experiment is the
+> for reproducibility. The experiment that followed was the
 > [conservative champion residual](champion-residual.md), which starts from the
 > champion's actual action distribution instead of replacing it.
 

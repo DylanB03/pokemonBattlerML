@@ -1,9 +1,12 @@
 # Pokémon Battler Policy-Training Harness
 
-This repository fine-tunes a small causal language model to choose actions in
-Generation 9 OU Pokémon battles. It converts Metamon replay trajectories into
-turn-level examples, trains `Qwen/Qwen2.5-0.5B` with QLoRA, and evaluates only
-actions that were legal in each recorded state.
+I built this repository to train a small causal language model to choose actions
+in Generation 9 OU Pokémon battles. It converts Metamon replay trajectories
+into turn-level examples, trains `Qwen/Qwen2.5-0.5B` with QLoRA, and evaluates
+only actions that were legal in each recorded state.
+
+First-person passages in the experiment notes are my project record. They
+describe the decisions I made, the runs I performed, and the results I observed.
 
 The original objective is supervised behavior cloning: predict a strong human
 player's recorded action from the visible battle state. The win-training path
@@ -11,14 +14,14 @@ now uses that checkpoint as a warm start, fits outcome-aware action and state
 values, and then optimizes Qwen directly through self-play PPO. Human-action
 agreement remains diagnostic; promotion is decided by complete-game results.
 
-## Continue the promoted large-data policy
+## Current strongest checkpoint
 
 The first 0.5% Metamon sidecar beat the previous champion 48% to 30% on a
 paired 100-game Foul Play schedule. The Qwen adapter and original interaction
 head were byte-identical; the trained structured sidecar was the only policy
-addition. The recommended next run continues that sidecar on the adjacent,
-strictly disjoint 0.5% hash window, rehearses old cached decisions, selects a
-blend on validation teams, and gates the result against the promoted v1:
+addition. I continued that sidecar on the adjacent, strictly disjoint 0.5% hash
+window, rehearsed old cached decisions, selected a blend on validation teams,
+and gated the result against the promoted v1 with this command:
 
 ```bash
 python -m pokemon_battler.large_offline_pipeline \
@@ -68,11 +71,17 @@ battle gate leaves `selected_checkpoint.txt` on the old champion when the
 candidate loses. The original v1 command and result remain documented in
 [Large offline self-play pipeline](docs/large-offline-selfplay.md).
 
+The completed v2 policy scored 109-91 on the 200-game held-out Foul Play
+schedule while v1 scored 96-104. I then froze
+`outputs/metamon-large-v2/04-candidate` and ran it for 100 public Generation 9
+OU ladder games. It finished **53-47** with 2,852 policy decisions and zero
+fallbacks. This is the strongest measured checkpoint in the repository.
+
 See [Large offline self-play pipeline](docs/large-offline-selfplay.md) for the
 data sources, action-parity check, resume behavior, throughput design, disk
 tradeoffs, artifact layout, and limitations. The recurrent IQL and conservative
 residual experiments remain reproducible, but both completed battle evaluations
-were negative and neither is the recommended next run.
+were negative and neither is part of the current training path.
 
 See [ROADMAP.md](ROADMAP.md) for the planned progression from behavior cloning
 to model-preference displays, replay review, counterfactual win-probability
@@ -148,7 +157,7 @@ overwriting the source model. See
 [Foul Play policy distillation](docs/foul-play-distillation.md).
 
 The old cumulative `pokemon-win-pipeline` is retained for reproducibility, but
-it is no longer the recommended training path. It repeatedly recomputes frozen
+it is no longer the current training path. It repeatedly recomputes frozen
 Qwen states, grows its dataset every round, and combines preview and Q-value
 changes before proving that either helps in battles.
 
@@ -194,7 +203,7 @@ cp .env.example .env
 python -m pokemon_battler.public_play --mode login
 ```
 
-The recommended first human test accepts a fixed account's unrated challenges:
+The first human test uses a fixed account's unrated challenges:
 
 ```bash
 python -m pokemon_battler.public_play \
@@ -278,7 +287,7 @@ and lack multi-turn move history, accumulated opponent reveals, and legal-mask
 provenance. The interaction runner now regenerates those rows, repeats a
 memorization gate, and trains once on the corrected data. The prior result,
 capacity analysis, and rationale for changing the architecture are in
-[What mechanics-v2 proved, and what should change next](docs/mechanics-v2-results-and-next-steps.md).
+[What mechanics-v2 taught me, and what I changed next](docs/mechanics-v2-results-and-next-steps.md).
 The tensor shapes, token layout, history rules, hierarchical loss, and
 value-head boundary are specified in
 [Interaction policy v3](docs/interaction-policy-v3.md).
@@ -338,10 +347,10 @@ This is the default protocol for one 8 GB NVIDIA GPU:
 
 The budgets are optimizer updates, not guesses based on an archive's byte size.
 The current local `gen9ou.tar.gz` is about 20.4 GB of compressed trajectories.
-That is not 20.4 GB of model tokens, and it does not tell us how much work one
+That is not 20.4 GB of model tokens, and it does not tell me how much work one
 epoch contains.
 
-The recommended model configuration is:
+The default model configuration is:
 
 ```text
 base checkpoint     Qwen/Qwen2.5-0.5B
@@ -361,12 +370,12 @@ The CLI represents QLoRA with two separate arguments:
 
 | Arguments | Training mode |
 | --- | --- |
-| `--method lora --load-in-4bit` | **QLoRA: the recommended 8 GB configuration** |
+| `--method lora --load-in-4bit` | **QLoRA: the default 8 GB configuration** |
 | `--method lora` without `--load-in-4bit` | LoRA over a BF16/FP16 base |
 | `--method full` without `--load-in-4bit` | Full-parameter fine-tuning |
 
 `--method lora` describes which parameters are trainable; `--load-in-4bit`
-describes how the frozen base weights are stored. Every recommended training
+describes how the frozen base weights are stored. Every current training
 command in this guide includes both arguments and therefore performs QLoRA.
 
 ## What is implemented
@@ -376,7 +385,7 @@ command in this guide includes both arguments and therefore performs QLoRA.
 - Metamon-compatible alphabetical action ordering
 - Removal of missing, terminal, and unrecoverably illegal replay labels
 - Dynamic switch options as Pokémon faint
-- Assistant-only causal-LM loss on the action ID and EOS tokens
+- Action-target-only causal-LM loss on the action ID and EOS tokens
 - A directly legal-masked 13-way policy-head objective that avoids action-label
   tokenization bias
 - A shared candidate head that scores each legal action description with the
@@ -439,7 +448,7 @@ It uses the same legal mask, but makes the score depend directly on the candidat
 semantics instead of a permanently assigned A0-A12 output weight. Candidate
 order is randomized during training to reduce position shortcuts.
 
-The recommended `--objective mechanics-head` path builds a 207-value vector and
+The current `--objective mechanics-head` path builds a 207-value vector and
 32 categorical identity fields for each A0-A12 candidate. The numeric branch
 contains action kind, type effectiveness, corrected Terastallization STAB,
 accuracy, PP, priority, approximate damage, speed/order context, typed side
@@ -762,7 +771,7 @@ ceiling. The v1 serializer remains available for its original checkpoints.
 
 The remaining numbered sections document the original generative-SFT research
 protocol. They are retained for reproducibility, but they are not the current
-recommended run and some of their budgets intentionally describe the old
+run and some of their budgets intentionally describe the old
 objective. Use the one-command mechanics-head experiment at the top of this
 README for the next model run. When reproducing a command in this legacy
 section, add `--objective sft --prompt-format verbose-v1` explicitly.
