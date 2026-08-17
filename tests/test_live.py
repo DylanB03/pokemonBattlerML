@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
@@ -226,6 +227,51 @@ class LivePolicyTests(unittest.TestCase):
 
         self.assertEqual(events[0]["rating_update"]["after"], 1112)
         self.assertEqual(events[0]["rating_update"]["change"], 22)
+
+    def test_showdown_room_rename_is_filtered_and_aliased(self) -> None:
+        player = object.__new__(InteractionPlayer)
+        player.ps_client = SimpleNamespace(username="ATSskipper5")
+        player.rating_updates = {}
+        battle = SimpleNamespace(battle_tag="battle-gen9ou-123")
+        player._battles = {battle.battle_tag: battle}
+        messages = [
+            [">battle-gen9ou-123"],
+            [
+                "",
+                "noinit",
+                "rename",
+                "battle-gen9ou-123-private",
+                "Opponent vs. ATSskipper5",
+            ],
+        ]
+
+        with patch(
+            "poke_env.player.player.Player._handle_battle_message",
+            new_callable=AsyncMock,
+        ) as base_handler:
+            asyncio.run(player._handle_battle_message(messages))
+
+        base_handler.assert_awaited_once_with([[">battle-gen9ou-123"]])
+        self.assertIs(player._battles["battle-gen9ou-123-private"], battle)
+
+    def test_normal_battle_messages_are_forwarded_unchanged(self) -> None:
+        player = object.__new__(InteractionPlayer)
+        player.ps_client = SimpleNamespace(username="ATSskipper5")
+        player.rating_updates = {}
+        player._battles = {}
+        messages = [
+            [">battle-gen9ou-123"],
+            ["", "turn", "14"],
+            ["", "win", "ATSskipper5"],
+        ]
+
+        with patch(
+            "poke_env.player.player.Player._handle_battle_message",
+            new_callable=AsyncMock,
+        ) as base_handler:
+            asyncio.run(player._handle_battle_message(messages))
+
+        base_handler.assert_awaited_once_with(messages)
 
     def test_public_preview_policy_can_randomize_the_lead(self) -> None:
         player = object.__new__(InteractionPlayer)

@@ -483,13 +483,47 @@ class InteractionPlayer(Player):
             if update is not None:
                 self.rating_updates[battle_id] = update
 
+    def _filter_battle_room_renames(
+        self, split_messages: list[list[str]]
+    ) -> list[list[str]]:
+        """Handle Showdown room renames that poke-env 0.15 cannot parse."""
+        if not split_messages or not split_messages[0]:
+            return split_messages
+
+        old_battle_id = split_messages[0][0].removeprefix(">")
+        battle = self._battles.get(old_battle_id)
+        forwarded = [split_messages[0]]
+        for split_message in split_messages[1:]:
+            is_room_rename = (
+                len(split_message) >= 3
+                and split_message[1] == "noinit"
+                and split_message[2] == "rename"
+            )
+            if not is_room_rename:
+                forwarded.append(split_message)
+                continue
+
+            # Public Showdown can replace a battle room with an opaque room id,
+            # usually as the room is expiring. AbstractBattle.parse_message has
+            # no handler for this client-only event. Keep an alias so any later
+            # messages using the replacement id still resolve to the same battle,
+            # then omit the unsupported row before delegating to poke-env.
+            if battle is not None and len(split_message) >= 4:
+                new_battle_id = split_message[3].removeprefix(">")
+                if new_battle_id:
+                    self._battles.setdefault(new_battle_id, battle)
+
+        return forwarded
+
     async def _handle_battle_message(self, split_messages: list[list[str]]) -> None:
         # poke-env marks the game complete as soon as it reads |win|/|tie|, but
         # Showdown's exact old -> new rating line follows later in the same
         # message. Capture the whole message first so closing a finished batch
         # cannot race and lose the final game's ELO update.
         self._capture_rating_updates(split_messages)
-        await super()._handle_battle_message(split_messages)
+        await super()._handle_battle_message(
+            self._filter_battle_room_renames(split_messages)
+        )
 
     def _write_decision(
         self,
