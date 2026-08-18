@@ -4,9 +4,9 @@
 representation, and what I was willing to call a result.*
 
 *Status: August 2026. The strongest measured checkpoint is now the second
-Metamon sidecar, `outputs/metamon-large-v2/04-candidate`. Its first frozen
-100-game public ladder run finished 53-47, the first positive public result in
-the project.*
+Metamon sidecar, `outputs/metamon-large-v2/04-candidate`. Across 1,000 frozen
+public ladder games, it finished 502-498. This is the first positive public
+result in the project at that scale.*
 
 The unfine-tuned model's first answer to a battle prompt looked like this:
 
@@ -912,45 +912,61 @@ for automatic promotion, but v2 now had the best point estimate in the blend
 sweep and the larger held-out test. I chose it for the public measurement while
 leaving the strict gate and its result intact.
 
-## The final public run finished 53-47
+## The final public measurement finished 502-498 over 1,000 games
 
 I ran `outputs/metamon-large-v2/04-candidate` as a frozen greedy policy on the
 public Generation 9 OU ladder. There was no PPO update and no learning between
 games. Four battles ran concurrently, the submitted team stayed fixed, and the
-team-preview lead was randomized. The model completed all 100 rated battles
-against 88 different opponents.
+team-preview lead was randomized.
+
+The first trace finished 53-47 over 100 games. I later collected another 900
+games with the same checkpoint and deployment settings; that set finished
+449-451. The two traces share no battle IDs, so I combined them into one
+1,000-game measurement against 770 different opponents. I counted every
+completed game and did not select a favorable subset.
 
 | Public result | Value |
 | --- | ---: |
-| Wins | 53 |
-| Losses | 47 |
-| Win rate | **53.0%** |
-| Decisions | 2,852 |
+| Wins | 502 |
+| Losses | 498 |
+| Win rate | **50.2%** |
+| 95% Wilson interval | 47.1%-53.3% |
+| Decisions | 30,385 |
 | Policy fallbacks | 0 |
-| Mean battle length | 23.3 turns |
-| Mean policy latency | 0.167 seconds |
+| Mean battle length | 24.8 turns |
 
-The record was 36-32 after the first 68 games and 17-15 over the remaining 32.
-The result therefore survived the pause and completion of the same frozen run.
-It also cleared the best earlier public set, which had stopped at 40%, and the
-35.6% aggregate from the five-batch PPO campaign.
+The 53% result from the first 100 games did not hold as the sample grew. The
+next 900 were almost exactly even, and the final positive margin was four
+games. The confidence interval still includes 50%, so this run does not prove
+that the policy's underlying ladder win rate is above even. It does give me a
+far better estimate than the first 100 games and clears the 35.6% aggregate
+from the earlier five-batch PPO campaign.
 
-The Showdown account `ATSskipper5` showed **1152 ELO** when I checked it after
-the experiment. That snapshot already included two later disconnect losses, so
-the rating at the exact end of the 53-47 set was somewhat higher. The client
-did not receive per-game rating updates during this run, which means I cannot
-recover the exact pre-disconnect number without inventing it. I treat 1152 as
-the conservative recorded account rating for the result.
+The Showdown account `ATSskipper5` started at **1000 ELO** and showed **1189
+ELO** on August 18, 2026, a net increase of 189 points. That account rating
+includes earlier policies, cancelled runs, and disconnect losses as well as
+these 1,000 games, so I cannot assign the whole increase to this checkpoint.
+Its clean result is the 502-498 record. The account rating shows where the bot
+ended up on the live ladder.
+
+Long public collections exposed a client problem too. `poke-env` can send a
+ladder search and wait forever for a battle-start notification. If Showdown
+drops or expires that search without delivering the notification, the process
+stays connected but stops requesting games. I stopped and resumed the run from
+its append-only trace when that happened. Resume counted only completed battle
+IDs, and I verified that the two source traces had no overlap. A matchmaking
+watchdog that retries stale searches without touching active battles is still
+needed for unattended runs.
 
 ## What finally made the difference
 
-The 53% run came from the accumulated representation work and a much larger
-offline dataset. The mechanics and identity features solved collisions that
-the old numeric summary could never separate. Qwen remained useful as the base
-distribution, while the sidecar handled candidate-to-state interactions in a
-compact form. Blending the two preserved behavior the small language model had
-already learned and gave the structured policy enough weight to change actual
-decisions.
+The positive 1,000-game result came from the accumulated representation work
+and a much larger offline dataset. The mechanics and identity features solved
+collisions that the old numeric summary could never separate. Qwen remained
+useful as the base distribution, while the sidecar handled candidate-to-state
+interactions in a compact form. Blending the two preserved behavior the small
+language model had already learned and gave the structured policy enough
+weight to change actual decisions.
 
 Data coverage mattered more than another small hyperparameter change. The
 earlier teacher and PPO loops recycled hundreds of games across a narrow team
@@ -961,14 +977,12 @@ gain.
 
 The evaluation process improved too. I stopped selecting checkpoints from loss
 alone. The blend sweep used held-out teams, the final comparison used another
-200-game schedule, and the public run froze the exact checkpoint under test.
-Zero fallbacks confirmed that the 53 wins came from the policy path rather than
-an emergency heuristic.
+200-game schedule, and the public measurement froze the exact checkpoint under
+test. Zero fallbacks across 30,385 decisions confirmed that the result came
+from the policy path rather than an emergency heuristic.
 
 This leaves `outputs/metamon-large-v2/04-candidate` as the strongest measured
-policy in the project. It is the first one to post a positive 100-game public
-record, and it reached that result without changing the 0.5B Qwen base model or
-using a battle-search engine at inference time. The route there was much less
-about finding a lucky learning rate than giving the model useful mechanics,
-enough varied experience, and a training process that actually continued the
-best thing I had already built.
+policy in the project. It posted a positive 1,000-game public record without
+changing the 0.5B Qwen base model or using a battle-search engine at inference
+time. The margin is too small to claim a reliably positive underlying win rate,
+but it is the longest and strongest public measurement I completed.

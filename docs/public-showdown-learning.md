@@ -63,20 +63,18 @@ preview and should not expose a permanent slot-one lead. Use
 `--team-preview first` only for a deliberately fixed-lead measurement.
 
 `--concurrent-games` controls the maximum number of public battles in flight
-for one logged-in player. Multiple frozen `--batches` are supported so a long
-evaluation can retain separate per-batch records without enabling PPO. For
-example, this runs five frozen 100-game suites with up to four simultaneous
-battles:
+for one logged-in player. To collect a 1,000-game frozen measurement in one
+report with up to four simultaneous battles, use:
 
 ```bash
 python -m pokemon_battler.public_play \
   --mode ladder \
   --checkpoint outputs/metamon-large-v2/04-candidate \
-  --games 100 \
-  --batches 5 \
+  --games 1000 \
+  --batches 1 \
   --concurrent-games 4 \
   --team-preview random \
-  --output-dir reports/public/metamon-large-v2-5x100
+  --output-dir reports/public/metamon-large-v2-frozen-1000-001
 ```
 
 This command deliberately omits `--learn`: the structured sidecar has its own
@@ -88,35 +86,47 @@ command with `--resume`. The runner rebuilds the current batch from its
 append-only `decisions.jsonl`, requests only the unfinished game count, and
 then continues later batches. It rejects checkpoint, account, batch-size,
 format, team, or preview-policy mismatches instead of combining different
-experiments. For the campaign above:
+experiments. For the measurement above:
 
 ```bash
 python -m pokemon_battler.public_play \
   --mode ladder \
   --checkpoint outputs/metamon-large-v2/04-candidate \
-  --games 100 \
-  --batches 5 \
+  --games 1000 \
+  --batches 1 \
   --concurrent-games 4 \
   --team-preview random \
-  --output-dir reports/public/metamon-large-v2-5x100 \
+  --output-dir reports/public/metamon-large-v2-frozen-1000-001 \
   --resume
 ```
 
-I completed the first 100-game batch with the frozen Metamon v2 checkpoint. It
-finished **53-47** against 88 public opponents, made 2,852 policy decisions,
-and used no fallback actions. The `ATSskipper5` account showed **1152 ELO** when
-I checked it afterward. That account snapshot included two later disconnect
-losses, so the exact rating at the end of game 100 was somewhat higher.
+I combined the original 100-game trace with 900 later games from the same
+frozen Metamon v2 checkpoint and deployment settings. The traces share no
+battle IDs. The resulting 1,000-game record was **502-498 (50.2%)** against 770
+opponents, with 30,385 policy decisions and no fallback actions. Its 95% Wilson
+interval was 47.1%-53.3%, so the achieved record was positive but the margin
+was not statistically conclusive.
 
-Completed battle records, decisions, replay files, fallbacks, inference
-latencies, and captured ELO transitions remain in the same batch summary.
-Resume is intentionally limited to frozen campaigns because PPO requires one
-complete on-policy rollout batch.
+The `ATSskipper5` account started at **1000 ELO** and showed **1189 ELO** on
+August 18, 2026, a gain of 189 points. The account also contains earlier model
+runs, cancelled sessions, and disconnect losses, so the full increase cannot
+be assigned to this checkpoint. Its clean result is the 502-498 record.
 
-There is no wall-clock deadline on a battle session. A finite `--games` run
-waits until every requested game has ended before closing the connection, even
-when the run takes several hours. `--login-timeout` applies only while initially
-authenticating, before matchmaking begins; it can never terminate a battle.
+Each source run keeps its completed battle records, decisions, replay files,
+fallbacks, inference latencies, and captured ELO transitions. I computed the
+aggregate figures above after deduplicating finished battle IDs from both
+traces. Resume is intentionally limited to frozen campaigns because PPO
+requires one complete on-policy rollout batch.
+
+There is no wall-clock deadline on a battle session. This prevents the client
+from abandoning an active rated battle, but it also exposes a `poke-env`
+matchmaking failure. A ladder search can wait forever if Showdown never sends
+the expected battle-start notification. The process remains connected and
+looks paused, but it does not issue another search. The current workaround is
+to stop it and use `--resume`; completed battle IDs remain in the append-only
+trace and are not replayed. An unattended runner still needs a watchdog that
+retries stale searches without interrupting active battles. `--login-timeout`
+only covers initial authentication.
 
 Every completed game immediately prints its result, opponent, turn count,
 cumulative win-loss-tie record, win rate, and the exact old-to-new ELO change
