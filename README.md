@@ -272,6 +272,10 @@ coaching.
   preview head.
 - The structured action-value targets come from logged final outcomes. They do
   not reveal what would have happened after unplayed actions.
+- I stopped after two disjoint 0.5% Metamon slices because the prepared rows,
+  feature caches, downloaded archives, and checkpoints filled the storage
+  available on my computer. A larger offline dataset may improve the policy,
+  but I could not test it on this machine.
 - The public account rating mixes several policies and operational failures.
 - The checkpoint uses a 0.5B language model and has no inference-time search.
 - The 50.2% point estimate is close enough to even that another independent
