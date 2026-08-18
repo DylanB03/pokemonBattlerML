@@ -114,8 +114,8 @@ Implemented:
 - A public Showdown runner with `.env` account loading, challenge and ladder
   modes, concurrent frozen battles, resumable reports, and optional
   between-batch PPO.
-- A completed frozen 100-game public run for the Metamon v2 checkpoint: 53 wins,
-  47 losses, and zero fallbacks across 2,852 decisions.
+- A completed 1,000-game frozen public measurement for the Metamon v2
+  checkpoint: 502 wins, 498 losses, and zero fallbacks across 30,385 decisions.
 
 Not yet implemented:
 

@@ -128,9 +128,11 @@ separate 200-game held-out schedule, v2 finished 109-91 while v1 finished
 The automatic pointer remained on v1 because the paired interval for the
 difference crossed zero. I kept that strict gate intact and used v2 as the next
 public candidate because it had the stronger point estimate in both battle
-stages. The frozen public run finished 53-47 over 100 Generation 9 OU ladder
-games with zero fallbacks across 2,852 decisions. The strongest measured
-checkpoint is `outputs/metamon-large-v2/04-candidate`.
+stages. I combined the first 100 frozen public games with 900 later games from
+the same checkpoint and deployment settings. The two traces share no battle
+IDs. The resulting Generation 9 OU ladder record was 502-498 over 1,000 games,
+with zero fallbacks across 30,385 decisions. The strongest measured checkpoint
+is `outputs/metamon-large-v2/04-candidate`.
 
 ## Where four-way parallelism is useful
 
