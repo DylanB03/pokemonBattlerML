@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import torch
 
-from pokemon_battler.modeling import (
+from pokemon_battler.models.modeling import (
     MechanicsHead,
     assistant_only_loss,
     indexed_logits_parameter,
@@ -16,8 +16,8 @@ from pokemon_battler.modeling import (
     policy_head_loss,
     score_legal_actions,
 )
-from pokemon_battler.mechanics import MECHANICS_FEATURE_COUNT as V1_FEATURE_COUNT
-from pokemon_battler.mechanics_v2 import (
+from pokemon_battler.core.mechanics import MECHANICS_FEATURE_COUNT as V1_FEATURE_COUNT
+from pokemon_battler.core.mechanics_v2 import (
     MECHANICS_FEATURE_COUNT as V2_FEATURE_COUNT,
     MECHANICS_IDENTITY_COUNT,
 )

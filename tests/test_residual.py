@@ -14,22 +14,22 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-from pokemon_battler.frozen_cache import checkpoint_signature
-from pokemon_battler.policy_suite import _should_promote
-from pokemon_battler.residual_cache import RESIDUAL_ARRAY_SPECS, RESIDUAL_CACHE_SCHEMA
-from pokemon_battler.residual_modeling import (
+from pokemon_battler.data.frozen_cache import checkpoint_signature
+from pokemon_battler.evaluation.policy_suite import _should_promote
+from pokemon_battler.data.residual_cache import RESIDUAL_ARRAY_SPECS, RESIDUAL_CACHE_SCHEMA
+from pokemon_battler.models.residual_modeling import (
     ResidualPolicyHead,
     load_champion_scorer,
     load_residual_head,
 )
-from pokemon_battler.residual_pipeline import (
+from pokemon_battler.pipelines.residual_pipeline import (
     _manifest_teams,
     _validate_source_and_replay_caches,
     build_parser,
 )
-from pokemon_battler.residual_pipeline import run as run_residual_pipeline
-from pokemon_battler.residual_train import train_residual_policy
-from pokemon_battler.trajectory_cache import ARRAY_SPECS, TRAJECTORY_CACHE_SCHEMA
+from pokemon_battler.pipelines.residual_pipeline import run as run_residual_pipeline
+from pokemon_battler.training.residual_train import train_residual_policy
+from pokemon_battler.data.trajectory_cache import ARRAY_SPECS, TRAJECTORY_CACHE_SCHEMA
 
 
 class ResidualPolicyTests(unittest.TestCase):
@@ -187,23 +187,23 @@ class ResidualPolicyTests(unittest.TestCase):
             references = self._selected_teacher_references()
             with (
                 patch(
-                    "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                    "pokemon_battler.pipelines.residual_pipeline.select_disjoint_teacher_rows",
                     return_value=(references, references, {"strategy": "test"}),
                 ),
-                patch("pokemon_battler.residual_pipeline._copy_references"),
+                patch("pokemon_battler.pipelines.residual_pipeline._copy_references"),
                 patch(
-                    "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                    "pokemon_battler.pipelines.residual_pipeline.build_residual_teacher_cache",
                     return_value={"rows": 1},
                 ),
                 patch(
-                    "pokemon_battler.residual_pipeline.train_residual_policy",
+                    "pokemon_battler.pipelines.residual_pipeline.train_residual_policy",
                     return_value={"offline_gate": {"passed": True}},
                 ),
                 patch(
-                    "pokemon_battler.residual_pipeline.run_policy_suite",
+                    "pokemon_battler.pipelines.residual_pipeline.run_policy_suite",
                     side_effect=[{"promoted": True}, {"promoted": True}],
                 ) as suite,
-                patch("pokemon_battler.residual_pipeline._release_memory"),
+                patch("pokemon_battler.pipelines.residual_pipeline._release_memory"),
                 redirect_stdout(io.StringIO()),
             ):
                 report = run_residual_pipeline(args)
@@ -228,19 +228,19 @@ class ResidualPolicyTests(unittest.TestCase):
             references = self._selected_teacher_references()
             with (
                 patch(
-                    "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                    "pokemon_battler.pipelines.residual_pipeline.select_disjoint_teacher_rows",
                     return_value=(references, references, {"strategy": "test"}),
                 ),
-                patch("pokemon_battler.residual_pipeline._copy_references"),
+                patch("pokemon_battler.pipelines.residual_pipeline._copy_references"),
                 patch(
-                    "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                    "pokemon_battler.pipelines.residual_pipeline.build_residual_teacher_cache",
                     return_value={"rows": 1},
                 ),
                 patch(
-                    "pokemon_battler.residual_pipeline.train_residual_policy",
+                    "pokemon_battler.pipelines.residual_pipeline.train_residual_policy",
                     side_effect=RuntimeError("deliberate failure"),
                 ),
-                patch("pokemon_battler.residual_pipeline._release_memory"),
+                patch("pokemon_battler.pipelines.residual_pipeline._release_memory"),
                 redirect_stdout(io.StringIO()),
                 self.assertRaisesRegex(RuntimeError, "deliberate failure"),
             ):
@@ -269,27 +269,27 @@ class ResidualPolicyTests(unittest.TestCase):
                 references = self._selected_teacher_references()
                 with (
                     patch(
-                        "pokemon_battler.residual_pipeline.select_disjoint_teacher_rows",
+                        "pokemon_battler.pipelines.residual_pipeline.select_disjoint_teacher_rows",
                         return_value=(
                             references,
                             references,
                             {"strategy": "test"},
                         ),
                     ),
-                    patch("pokemon_battler.residual_pipeline._copy_references"),
+                    patch("pokemon_battler.pipelines.residual_pipeline._copy_references"),
                     patch(
-                        "pokemon_battler.residual_pipeline.build_residual_teacher_cache",
+                        "pokemon_battler.pipelines.residual_pipeline.build_residual_teacher_cache",
                         return_value={"rows": 1},
                     ),
                     patch(
-                        "pokemon_battler.residual_pipeline.train_residual_policy",
+                        "pokemon_battler.pipelines.residual_pipeline.train_residual_policy",
                         return_value={"offline_gate": {"passed": offline_passed}},
                     ),
                     patch(
-                        "pokemon_battler.residual_pipeline.run_policy_suite",
+                        "pokemon_battler.pipelines.residual_pipeline.run_policy_suite",
                         side_effect=suite_results,
                     ) as suite,
-                    patch("pokemon_battler.residual_pipeline._release_memory"),
+                    patch("pokemon_battler.pipelines.residual_pipeline._release_memory"),
                     redirect_stdout(io.StringIO()),
                 ):
                     report = run_residual_pipeline(args)

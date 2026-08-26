@@ -8,18 +8,18 @@ from pathlib import Path
 
 import torch
 
-from pokemon_battler.interaction_cache import (
+from pokemon_battler.data.interaction_cache import (
     InteractionCacheDataset,
     build_interaction_cache,
     interaction_cache_is_current,
 )
-from pokemon_battler.interaction_features import build_interaction_features
-from pokemon_battler.interaction_modeling import (
+from pokemon_battler.models.interaction_features import build_interaction_features
+from pokemon_battler.models.interaction_modeling import (
     InteractionPolicyHead,
     interaction_policy_loss,
 )
-from pokemon_battler.prepare import SplitConfig, prepare_dataset
-from pokemon_battler.training_data import (
+from pokemon_battler.data.prepare import SplitConfig, prepare_dataset
+from pokemon_battler.data.training_data import (
     InteractionCollator,
     JsonlOffsetDataset,
 )

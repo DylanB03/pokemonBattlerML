@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pokemon_battler.observations import OBSERVATION_SCHEMA, canonicalize_observation
+from pokemon_battler.core.observations import OBSERVATION_SCHEMA, canonicalize_observation
 from tests.helpers import pokemon, state
 
 

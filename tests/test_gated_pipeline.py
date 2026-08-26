@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pokemon_battler.gated_pipeline import _cached_command, build_parser
-from pokemon_battler.policy_ablation import _configuration_rows
+from pokemon_battler.pipelines.gated_pipeline import _cached_command, build_parser
+from pokemon_battler.evaluation.policy_ablation import _configuration_rows
 
 
 class GatedPipelineTests(unittest.TestCase):

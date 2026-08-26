@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from pokemon_battler.frozen_cache import (
+from pokemon_battler.data.frozen_cache import (
     DATA_FILENAME,
     FROZEN_CACHE_SCHEMA,
     FrozenCacheDataset,

@@ -37,7 +37,7 @@ environment variables with the same names override the file when present.
 Verify the account without loading Qwen:
 
 ```bash
-python -m pokemon_battler.public_play --mode login
+pokemon-public-play --mode login
 ```
 
 ## Play frozen-policy games first
@@ -46,7 +46,7 @@ The first real games use unrated challenges from one named testing
 account. Start the bot with:
 
 ```bash
-python -m pokemon_battler.public_play \
+pokemon-public-play \
   --mode accept \
   --opponent YourTestingAccount \
   --games 20
@@ -67,7 +67,7 @@ for one logged-in player. To collect a 1,000-game frozen measurement in one
 report with up to four simultaneous battles, use:
 
 ```bash
-python -m pokemon_battler.public_play \
+pokemon-public-play \
   --mode ladder \
   --checkpoint outputs/metamon-large-v2/04-candidate \
   --games 1000 \
@@ -89,7 +89,7 @@ format, team, or preview-policy mismatches instead of combining different
 experiments. For the measurement above:
 
 ```bash
-python -m pokemon_battler.public_play \
+pokemon-public-play \
   --mode ladder \
   --checkpoint outputs/metamon-large-v2/04-candidate \
   --games 1000 \
@@ -153,7 +153,7 @@ outputs/qwen-win-pilot-1/selected_checkpoint.txt
 After the frozen run is sound, an opt-in learning session is:
 
 ```bash
-python -m pokemon_battler.public_play \
+pokemon-public-play \
   --mode accept \
   --opponent YourTestingAccount \
   --games 32 \
@@ -189,7 +189,7 @@ This command plays consecutive 100-game learning batches, stops as soon as a
 batch has more wins than losses, and otherwise stops after 1,000 public games:
 
 ```bash
-python -m pokemon_battler.public_play \
+pokemon-public-play \
   --mode ladder \
   --games 100 \
   --batches 10 \
@@ -262,7 +262,7 @@ and terminal results; the username is not a model feature.
 The technical ladder command is explicit:
 
 ```bash
-python -m pokemon_battler.public_play --mode ladder --games 20
+pokemon-public-play --mode ladder --games 20
 ```
 
 Use direct challenges first. Public ladder automation is subject to Pokémon

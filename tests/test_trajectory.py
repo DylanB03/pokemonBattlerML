@@ -14,20 +14,20 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from pokemon_battler.frozen_cache import checkpoint_signature
-from pokemon_battler.interaction_features import validate_interaction_row
-from pokemon_battler.prepare import ReplayMetadata
-from pokemon_battler.trajectory_cache import ARRAY_SPECS, TRAJECTORY_CACHE_SCHEMA
-from pokemon_battler.trajectory_modeling import (
+from pokemon_battler.data.frozen_cache import checkpoint_signature
+from pokemon_battler.models.interaction_features import validate_interaction_row
+from pokemon_battler.data.prepare import ReplayMetadata
+from pokemon_battler.data.trajectory_cache import ARRAY_SPECS, TRAJECTORY_CACHE_SCHEMA
+from pokemon_battler.models.trajectory_modeling import (
     TrajectoryPolicyHead,
     load_trajectory_head,
 )
-from pokemon_battler.trajectory_prepare import (
+from pokemon_battler.data.trajectory_prepare import (
     PREVIOUS_ACTION_SENTINEL,
     trajectory_rows,
 )
-from pokemon_battler.trajectory_pipeline import build_parser as build_pipeline_parser
-from pokemon_battler.trajectory_train import (
+from pokemon_battler.pipelines.trajectory_pipeline import build_parser as build_pipeline_parser
+from pokemon_battler.training.trajectory_train import (
     SequenceWindowDataset,
     collate_sequence_windows,
     trajectory_iql_loss,

@@ -436,7 +436,7 @@ offline outcome phase. Search is not part of the Qwen win-training path.
 The integrated command is:
 
 ```bash
-python -m pokemon_battler.interaction_experiment
+pokemon-interaction-run
 ```
 
 It prepares schema-3 data, builds caches, runs the 128-row gate, trains one

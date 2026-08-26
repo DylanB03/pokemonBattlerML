@@ -6,7 +6,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from pokemon_battler.teacher_collect import (
+from pokemon_battler.showdown.teacher_collect import (
     _enemy_schedule,
     _foul_play_winners,
     _latest_foul_play_record,
@@ -83,9 +83,9 @@ class TeacherCollectTests(unittest.TestCase):
             team = root / "obsolete.txt"
             team.write_text(TEAM_ONE, encoding="utf-8")
             with (
-                patch("pokemon_battler.teacher_collect.shutil.which", return_value="node"),
+                patch("pokemon_battler.showdown.teacher_collect.shutil.which", return_value="node"),
                 patch(
-                    "pokemon_battler.teacher_collect.subprocess.run",
+                    "pokemon_battler.showdown.teacher_collect.subprocess.run",
                     return_value=CompletedProcess(
                         args=[],
                         returncode=1,

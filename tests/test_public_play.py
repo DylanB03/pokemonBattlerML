@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from pokemon_battler.public_play import (
+from pokemon_battler.showdown.public_play import (
     OPPONENT_KEY,
     PASSWORD_KEY,
     PublicBattleProgress,
@@ -197,10 +197,10 @@ class PublicPlayTests(unittest.TestCase):
             }
             with (
                 patch(
-                    "pokemon_battler.public_play._play_public_batch",
+                    "pokemon_battler.showdown.public_play._play_public_batch",
                     new=AsyncMock(side_effect=[public_summary, public_summary]),
                 ) as play,
-                patch("pokemon_battler.public_play._release_models"),
+                patch("pokemon_battler.showdown.public_play._release_models"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 summary = run(args)
@@ -460,10 +460,10 @@ class PublicPlayTests(unittest.TestCase):
 
             with (
                 patch(
-                    "pokemon_battler.public_play._play_public_batch",
+                    "pokemon_battler.showdown.public_play._play_public_batch",
                     new=AsyncMock(side_effect=fake_play),
                 ),
-                patch("pokemon_battler.public_play._release_models"),
+                patch("pokemon_battler.showdown.public_play._release_models"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 summary = run(args)
@@ -506,7 +506,7 @@ class PublicPlayTests(unittest.TestCase):
                 "error": None,
             }
             with patch(
-                "pokemon_battler.public_play._probe_public_login",
+                "pokemon_battler.showdown.public_play._probe_public_login",
                 new=AsyncMock(return_value=probe),
             ), contextlib.redirect_stdout(io.StringIO()):
                 run(args)
@@ -565,18 +565,18 @@ class PublicPlayTests(unittest.TestCase):
             promotion = {"wins": 2, "losses": 0, "ties": 0, "score": 1.0}
             with (
                 patch(
-                    "pokemon_battler.public_play._play_public_batch",
+                    "pokemon_battler.showdown.public_play._play_public_batch",
                     new=AsyncMock(return_value=public_summary),
                 ),
                 patch(
-                    "pokemon_battler.public_play.train_ppo_rollouts",
+                    "pokemon_battler.showdown.public_play.train_ppo_rollouts",
                     side_effect=fake_train,
                 ),
                 patch(
-                    "pokemon_battler.public_play._promotion_evaluation",
+                    "pokemon_battler.showdown.public_play._promotion_evaluation",
                     return_value=promotion,
                 ),
-                patch("pokemon_battler.public_play._release_models"),
+                patch("pokemon_battler.showdown.public_play._release_models"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 summary = run(args)
@@ -636,12 +636,12 @@ class PublicPlayTests(unittest.TestCase):
             promotion = Mock()
             with (
                 patch(
-                    "pokemon_battler.public_play._play_public_batch",
+                    "pokemon_battler.showdown.public_play._play_public_batch",
                     new=AsyncMock(return_value=public_summary),
                 ) as play,
-                patch("pokemon_battler.public_play.train_ppo_rollouts", train),
-                patch("pokemon_battler.public_play._promotion_evaluation", promotion),
-                patch("pokemon_battler.public_play._release_models"),
+                patch("pokemon_battler.showdown.public_play.train_ppo_rollouts", train),
+                patch("pokemon_battler.showdown.public_play._promotion_evaluation", promotion),
+                patch("pokemon_battler.showdown.public_play._release_models"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 summary = run(args)
@@ -716,18 +716,18 @@ class PublicPlayTests(unittest.TestCase):
             promotion = {"wins": 2, "losses": 0, "ties": 0, "score": 1.0}
             with (
                 patch(
-                    "pokemon_battler.public_play._play_public_batch",
+                    "pokemon_battler.showdown.public_play._play_public_batch",
                     new=AsyncMock(side_effect=[public_summary, public_summary]),
                 ),
                 patch(
-                    "pokemon_battler.public_play.train_ppo_rollouts",
+                    "pokemon_battler.showdown.public_play.train_ppo_rollouts",
                     side_effect=fake_train,
                 ),
                 patch(
-                    "pokemon_battler.public_play._promotion_evaluation",
+                    "pokemon_battler.showdown.public_play._promotion_evaluation",
                     return_value=promotion,
                 ),
-                patch("pokemon_battler.public_play._release_models"),
+                patch("pokemon_battler.showdown.public_play._release_models"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 summary = run(args)

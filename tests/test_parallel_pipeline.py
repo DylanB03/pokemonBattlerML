@@ -6,11 +6,11 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
-from pokemon_battler.foul_play_worker import _fallback_decision
-from pokemon_battler.parallel_teacher_collect import _merge_traces, _worker_command
-from pokemon_battler.policy_suite import _checkpoint_preview_enabled, _indexed_results
-from pokemon_battler.structured_blend_sweep import _normalized_weights, _weight_slug
-from pokemon_battler.structured_modeling import set_structured_blend_weight
+from pokemon_battler.showdown.foul_play_worker import _fallback_decision
+from pokemon_battler.showdown.parallel_teacher_collect import _merge_traces, _worker_command
+from pokemon_battler.evaluation.policy_suite import _checkpoint_preview_enabled, _indexed_results
+from pokemon_battler.evaluation.structured_blend_sweep import _normalized_weights, _weight_slug
+from pokemon_battler.models.structured_modeling import set_structured_blend_weight
 
 
 class ParallelPipelineTests(unittest.TestCase):

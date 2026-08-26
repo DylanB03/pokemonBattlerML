@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from pokemon_battler.foul_play_teacher_bridge import (
+from pokemon_battler.showdown.foul_play_teacher_bridge import (
     _choice_action_id,
     aggregate_mcts_policy,
     aggregate_mcts_targets,

@@ -13,33 +13,33 @@ import lz4.frame
 import torch
 from safetensors.torch import save_file as save_safetensors
 
-from pokemon_battler.interaction_modeling import InteractionPolicyHead
-from pokemon_battler.large_offline_pipeline import (
+from pokemon_battler.models.interaction_modeling import InteractionPolicyHead
+from pokemon_battler.pipelines.large_offline_pipeline import (
     _blend_sweep_arguments,
     _evaluation_arguments,
     _estimated_interaction_cache_bytes,
     build_parser,
 )
-from pokemon_battler.metamon_assets import download_selfplay
-from pokemon_battler.parallel_interaction_cache import build_parallel_interaction_caches
-from pokemon_battler.parallel_trajectory_prepare import (
+from pokemon_battler.data.metamon_assets import download_selfplay
+from pokemon_battler.data.parallel_interaction_cache import build_parallel_interaction_caches
+from pokemon_battler.data.parallel_trajectory_prepare import (
     prepare_trajectory_dataset_parallel,
 )
-from pokemon_battler.prepare import SplitConfig
-from pokemon_battler.structured_modeling import (
+from pokemon_battler.data.prepare import SplitConfig
+from pokemon_battler.models.structured_modeling import (
     STRUCTURED_POLICY_SCHEMA,
     initialize_structured_head,
     load_structured_head,
     save_structured_head,
 )
-from pokemon_battler.structured_train import (
+from pokemon_battler.training.structured_train import (
     ShardedInteractionDataset,
     StructuredPolicyCollator,
     train_structured_policy,
 )
-from pokemon_battler.team_manifest import build_team_manifests
-from pokemon_battler.training_data import ShardedJsonlDataset
-from pokemon_battler.trajectory_prepare import _trajectory_is_selected
+from pokemon_battler.data.team_manifest import build_team_manifests
+from pokemon_battler.data.training_data import ShardedJsonlDataset
+from pokemon_battler.data.trajectory_prepare import _trajectory_is_selected
 from tests.helpers import state, terminal_state
 
 
@@ -387,7 +387,7 @@ class LargeOfflineTests(unittest.TestCase):
             downloaded.parent.mkdir()
             downloaded.write_bytes(b"compressed archive fixture")
             with patch(
-                "pokemon_battler.metamon_assets._download_file",
+                "pokemon_battler.data.metamon_assets._download_file",
                 return_value=downloaded,
             ):
                 result = download_selfplay(root, subset="pac-base")

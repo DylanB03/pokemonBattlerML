@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pokemon_battler.distillation import TEACHER_SCHEMA
-from pokemon_battler.selective_data import (
+from pokemon_battler.training.distillation import TEACHER_SCHEMA
+from pokemon_battler.data.selective_data import (
     select_disjoint_teacher_rows,
     select_teacher_rows,
 )

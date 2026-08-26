@@ -3,9 +3,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-data/
-outputs/
-reports/
+/data/
+/outputs/
+/reports/
 
 *.mechanics-v*.npy
 *.mechanics-v*.npy.json

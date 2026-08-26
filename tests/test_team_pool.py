@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pokemon_battler.team_pool import ShuffledTeamPool, resolve_team_pool
+from pokemon_battler.data.team_pool import ShuffledTeamPool, resolve_team_pool
 
 TEAM_ONE = """Pikachu @ Light Ball
 Ability: Static

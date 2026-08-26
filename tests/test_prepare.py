@@ -8,7 +8,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from pokemon_battler.prepare import (
+from pokemon_battler.data.prepare import (
     SplitConfig,
     choose_split,
     iter_trajectories,

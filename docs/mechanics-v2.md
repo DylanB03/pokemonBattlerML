@@ -4,9 +4,8 @@ The first completed v2 run reached 42.86% exact action agreement on 5,000
 validation rows. On the fixed 1,024-row training-validation check, it reached
 41.89% compared with the earlier candidate-head reference of 36.52%. The run
 also exposed an outdated prepared dataset and limits in the independent
-candidate scorer. See
-[What mechanics-v2 taught me, and what I changed next](mechanics-v2-results-and-next-steps.md)
-before starting another full run.
+candidate scorer. The later architecture and results are covered in the
+[project write-up](https://www.dylanb.ca/projects/pokemon-battler).
 
 ## Why v1 was replaced
 
@@ -142,7 +141,7 @@ instead of silently reading the wrong columns.
 The single-command experiment is:
 
 ```bash
-python -m pokemon_battler.experiment \
+pokemon-run \
   --output-dir outputs/mechanics-v2-1epoch
 ```
 

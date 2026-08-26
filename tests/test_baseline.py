@@ -4,8 +4,8 @@ import unittest
 
 import torch
 
-from pokemon_battler.baseline import FeatureCollator, HashedActionPolicy
-from pokemon_battler.mechanics_baseline import MechanicsOnlyCollator, MechanicsOnlyPolicy
+from pokemon_battler.evaluation.baseline import FeatureCollator, HashedActionPolicy
+from pokemon_battler.evaluation.mechanics_baseline import MechanicsOnlyCollator, MechanicsOnlyPolicy
 from tests.helpers import state
 
 

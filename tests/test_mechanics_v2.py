@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pokemon_battler.actions import ACTION_COUNT
-from pokemon_battler.mechanics_v2 import (
+from pokemon_battler.core.actions import ACTION_COUNT
+from pokemon_battler.core.mechanics_v2 import (
     MECHANICS_FEATURE_COUNT,
     MECHANICS_FEATURE_NAMES,
     MECHANICS_IDENTITY_COUNT,
@@ -14,9 +14,9 @@ from pokemon_battler.mechanics_v2 import (
     candidate_feature_matrix,
     candidate_identity_matrix,
 )
-from pokemon_battler.mechanics_cache import build_feature_cache, cache_is_current
-from pokemon_battler.prompting import render_prompt
-from pokemon_battler.training_data import JsonlOffsetDataset, MechanicsCacheDataset
+from pokemon_battler.data.mechanics_cache import build_feature_cache, cache_is_current
+from pokemon_battler.core.prompting import render_prompt
+from pokemon_battler.data.training_data import JsonlOffsetDataset, MechanicsCacheDataset
 from tests.helpers import move, state
 
 

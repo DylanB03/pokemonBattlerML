@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from pokemon_battler.actions import (
+from pokemon_battler.core.actions import (
     action_label,
     describe_action,
     legal_action_ids,
     parse_action_label,
     pp_aware_legal_action_ids,
 )
-from pokemon_battler.prompting import render_prompt, render_prompt_sections
+from pokemon_battler.core.prompting import render_prompt, render_prompt_sections
 from tests.helpers import state
 
 

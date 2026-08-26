@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from pokemon_battler.training_data import (
+from pokemon_battler.data.training_data import (
     CandidateCollator,
     MechanicsCollator,
     PolicyCollator,

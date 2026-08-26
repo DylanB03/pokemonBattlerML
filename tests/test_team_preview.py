@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from pokemon_battler.team_preview import TeamPreviewCollator, TeamPreviewHead
+from pokemon_battler.models.team_preview import TeamPreviewCollator, TeamPreviewHead
 from tests.helpers import pokemon
 from tests.test_interaction import FakeTokenizer
 

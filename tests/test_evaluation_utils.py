@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from collections import Counter
 
-from pokemon_battler.evaluation_utils import ActionMetrics, select_evaluation_dataset
+from pokemon_battler.evaluation.evaluation_utils import ActionMetrics, select_evaluation_dataset
 from tests.helpers import state
 
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from pokemon_battler.experiment import _train_arguments, build_parser
-from pokemon_battler.interaction_experiment import (
+from pokemon_battler.pipelines.experiment import _train_arguments, build_parser
+from pokemon_battler.pipelines.interaction_experiment import (
     DEFAULT_DATA_DIR,
     DEFAULT_OUTPUT_DIR,
     build_parser as build_interaction_parser,

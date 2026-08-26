@@ -27,7 +27,7 @@ Metamon's current data and model descriptions are in its
 Run this from the repository root in the already-activated environment:
 
 ```bash
-python -m pokemon_battler.large_offline_pipeline \
+pokemon-large-offline-run \
   --output-dir outputs/metamon-large-v1
 ```
 
@@ -50,7 +50,7 @@ changed with `--maximum-prepared-gib` and `--maximum-cache-gib`.
 To use every Gen 9 trajectory on a machine with hundreds of GiB available:
 
 ```bash
-python -m pokemon_battler.large_offline_pipeline \
+pokemon-large-offline-run \
   --output-dir outputs/metamon-large-full-v1 \
   --trajectory-sample-rate 1 \
   --maximum-prepared-gib 300 \
@@ -85,7 +85,7 @@ the same deterministic sample as though it were new data. The v2 command does
 both:
 
 ```bash
-python -m pokemon_battler.large_offline_pipeline \
+pokemon-large-offline-run \
   --output-dir outputs/metamon-large-v2 \
   --checkpoint outputs/metamon-large-v1/04-candidate \
   --trajectory-sample-rate 0.005 \

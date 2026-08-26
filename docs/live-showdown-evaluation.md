@@ -9,19 +9,13 @@ finetune, or overwrite the checkpoint.
 From the repository root in the active Python environment:
 
 ```bash
-python -m pokemon_battler.live_eval --games 20 --opponent heuristic
-```
-
-The equivalent installed entry point is:
-
-```bash
 pokemon-live-eval --games 20 --opponent heuristic
 ```
 
 For a fast installation and integration check before a longer comparison, run:
 
 ```bash
-python -m pokemon_battler.live_eval --games 1 --opponent random --fail-fast
+pokemon-live-eval --games 1 --opponent random --fail-fast
 ```
 
 The first run bootstraps `data/pokemon-showdown/` with the official server and
@@ -91,7 +85,7 @@ When Foul Play is selected, the report directory also contains
 `foul_play_teacher.jsonl`. This is an opponent-perspective diagnostic trace:
 Foul Play controls the opposing team in this benchmark, so do not use it as the
 fixed-team model's main distillation dataset. The dedicated collector reverses
-the roles correctly. See [Foul Play policy distillation](foul-play-distillation.md).
+the roles correctly and is available through `pokemon-teacher-collect`.
 
 | Opponent | Source revision | License | Runtime behavior |
 | --- | --- | --- | --- |
@@ -102,9 +96,9 @@ the roles correctly. See [Foul Play policy distillation](foul-play-distillation.
 Run twenty games against each with:
 
 ```bash
-python -m pokemon_battler.live_eval --games 20 --opponent pokechamp-one-step
-python -m pokemon_battler.live_eval --games 20 --opponent pokechamp-abyssal
-python -m pokemon_battler.live_eval --games 20 --opponent foul-play
+pokemon-live-eval --games 20 --opponent pokechamp-one-step
+pokemon-live-eval --games 20 --opponent pokechamp-abyssal
+pokemon-live-eval --games 20 --opponent foul-play
 ```
 
 Use `--no-bootstrap-opponents` to require the pinned checkouts and isolated
@@ -117,7 +111,7 @@ The default player and opponent both use
 with:
 
 ```bash
-python -m pokemon_battler.live_eval \
+pokemon-live-eval \
   --games 100 \
   --opponent heuristic \
   --team-file /path/to/player-team.txt \
@@ -186,20 +180,20 @@ Useful options include:
 
 ```bash
 # Reuse an installation but refuse automatic cloning or npm installation.
-python -m pokemon_battler.live_eval --no-bootstrap-server
+pokemon-live-eval --no-bootstrap-server
 
 # Connect to a separately managed local server on another port.
-python -m pokemon_battler.live_eval \
+pokemon-live-eval \
   --server-port 9000 \
   --showdown-dir /path/to/pokemon-showdown \
   --no-bootstrap-server
 
 # Leave a server started by the runner alive after evaluation.
-python -m pokemon_battler.live_eval --keep-server
+pokemon-live-eval --keep-server
 ```
 
 The local player deliberately keeps connection details separate from policy
 logic. Public account authentication, bounded challenge/ladder matchmaking,
 trajectory capture, and opt-in between-batch PPO are implemented separately in
-`pokemon_battler.public_play`; they reuse this model and state converter. See
+`pokemon_battler.showdown.public_play`; they reuse this model and state converter. See
 [Public Showdown play and between-game learning](public-showdown-learning.md).

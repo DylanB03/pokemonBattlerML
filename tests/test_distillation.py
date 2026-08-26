@@ -5,7 +5,7 @@ import unittest
 
 import torch
 
-from pokemon_battler.distillation import (
+from pokemon_battler.training.distillation import (
     TEACHER_SCHEMA,
     teacher_distillation_loss,
     teacher_policy,

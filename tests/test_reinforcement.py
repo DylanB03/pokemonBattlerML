@@ -7,8 +7,8 @@ from pathlib import Path
 
 import torch
 
-from pokemon_battler.league import QwenLeague
-from pokemon_battler.reinforcement import (
+from pokemon_battler.training.league import QwenLeague
+from pokemon_battler.training.reinforcement import (
     ROLLOUT_SCHEMA,
     WinTrajectoryBuffer,
     expectile_loss,
@@ -16,7 +16,7 @@ from pokemon_battler.reinforcement import (
     offline_outcome_loss,
     ppo_loss,
 )
-from pokemon_battler.win_experiment import _default_team_rotations, build_parser
+from pokemon_battler.pipelines.win_experiment import _default_team_rotations, build_parser
 
 
 class ReinforcementTests(unittest.TestCase):

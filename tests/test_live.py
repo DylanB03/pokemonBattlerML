@@ -8,19 +8,19 @@ from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
-from pokemon_battler.interaction_features import validate_interaction_observation
-from pokemon_battler.live_eval import DEFAULT_TEAM, build_parser
-from pokemon_battler.live_policy import (
+from pokemon_battler.models.interaction_features import validate_interaction_observation
+from pokemon_battler.showdown.live_eval import DEFAULT_TEAM, build_parser
+from pokemon_battler.showdown.live_policy import (
     InteractionPlayer,
     parse_showdown_rating_update,
 )
-from pokemon_battler.live_state import (
+from pokemon_battler.showdown.live_state import (
     LiveBattleTracker,
     battle_to_metamon_state,
     exact_live_legal_action_ids,
     live_action_to_order,
 )
-from pokemon_battler.training_data import InteractionInferenceCollator
+from pokemon_battler.data.training_data import InteractionInferenceCollator
 
 
 class Named:

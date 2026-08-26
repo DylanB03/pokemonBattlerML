@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pokemon_battler.external_opponents import (
+from pokemon_battler.showdown.external_opponents import (
     EXTERNAL_OPPONENTS,
     ExternalOpponentProcess,
 )
-from pokemon_battler.live_eval import build_parser
+from pokemon_battler.showdown.live_eval import build_parser
 
 
 class ExternalOpponentTests(unittest.TestCase):

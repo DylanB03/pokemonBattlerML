@@ -8,14 +8,14 @@ from types import SimpleNamespace
 
 import torch
 
-from pokemon_battler.train import (
+from pokemon_battler.training.train import (
     _evaluate_model,
     _save_checkpoint,
     _training_class_weights,
     learning_rate_multiplier,
     meaningful_validation_improvement,
 )
-from pokemon_battler.interaction_modeling import (
+from pokemon_battler.models.interaction_modeling import (
     INTERACTION_HEAD_FILENAME,
     InteractionPolicyHead,
 )
